@@ -13,7 +13,7 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 from __future__ import annotations
-
+import re
 import asyncio
 import enum
 import json
@@ -208,15 +208,22 @@ class LLMEntityRelationExtractor(EntityRelationExtractor):
         """Run entity extraction for a given text chunk."""
         prompt = self.prompt_template.format(
             text=chunk.text,
+            file_path=chunk.metadata.get("file_path", ""),
             schema=schema.model_dump(exclude_none=True),
             examples=examples,
+            code_type=chunk.metadata.get("code_type", ""),
         )
         llm_result = await self.llm.ainvoke(prompt)
+        # 正则提取json内容
+        json_content = re.search(r"```json(.*?)```", llm_result.content, re.DOTALL)
+        if json_content:
+            llm_result.content = json_content.group(1)
         try:
             llm_generated_json = fix_invalid_json(llm_result.content)
             result = json.loads(llm_generated_json)
         except (json.JSONDecodeError, InvalidJSONError) as e:
             if self.on_error == OnError.RAISE:
+                print(llm_result)
                 raise LLMGenerationError("LLM response is not valid JSON") from e
             else:
                 logger.error(
@@ -226,8 +233,11 @@ class LLMEntityRelationExtractor(EntityRelationExtractor):
             result = {"nodes": [], "relationships": []}
         try:
             chunk_graph = Neo4jGraph.model_validate(result)
+            print("chunk_graph", llm_result.content)
+            raise
         except ValidationError as e:
             if self.on_error == OnError.RAISE:
+                print(llm_result)
                 raise LLMGenerationError("LLM response has improper format") from e
             else:
                 logger.error(

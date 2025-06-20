@@ -1,0 +1,135 @@
+{
+    "node_types": [
+        {
+            "label": "Function",
+            "description": "A MATLAB function definition",
+            "properties": [
+                {
+                    "name": "name",
+                    "type": "STRING",
+                    "description": "Name of the function",
+                    "required": false
+                },
+                {
+                    "name": "file_path",
+                    "type": "STRING",
+                    "description": "Path to the file containing the function",
+                    "required": false
+                },
+                {
+                    "name": "line_range",
+                    "type": "STRING",
+                    "description": "Line range where the function is defined",
+                    "required": false
+                },
+                {
+                    "name": "description",
+                    "type": "STRING",
+                    "description": "Function description from docstring",
+                    "required": false
+                },
+                {
+                    "name": "parameters",
+                    "type": "STRING",
+                    "description": "List of function parameters",
+                    "required": false
+                },
+                {
+                    "name": "returns",
+                    "type": "STRING",
+                    "description": "List of return values",
+                    "required": false
+                }
+            ],
+            "additional_properties": true
+        },
+        {
+            "label": "Variable",
+            "description": "A variable used in the code",
+            "properties": [
+                {
+                    "name": "name",
+                    "type": "STRING",
+                    "description": "Name of the variable",
+                    "required": false
+                },
+                {
+                    "name": "file_path",
+                    "type": "STRING",
+                    "description": "Path to the file where the variable is defined",
+                    "required": false
+                },
+                {
+                    "name": "line_range",
+                    "type": "LIST",
+                    "description": "List of tuples containing variable usage in script and corresponding line range, each tuple element is like (context, start_line, end_line)",
+                    "required": false
+                }
+            ],
+            "additional_properties": true
+        },
+        {
+            "label": "Script",
+            "description": "A MATLAB script file",
+            "properties": [
+                {
+                    "name": "name",
+                    "type": "STRING",
+                    "description": "Name of the script",
+                    "required": false
+                },
+                {
+                    "name": "file_path",
+                    "type": "STRING",
+                    "description": "Path to the script file",
+                    "required": false
+                },
+                {
+                    "name": "description",
+                    "type": "STRING",
+                    "description": "Script description",
+                    "required": false
+                }
+            ],
+            "additional_properties": true
+        }
+    ],
+    "relationship_types": [
+        {
+            "label": "CALLS",
+            "description": "A function or script calls another function or script",
+            "properties": [],
+            "additional_properties": true
+        },
+        {
+            "label": "USES",
+            "description": "A function or script uses a variable which is defined in another function or script",
+            "properties": [],
+            "additional_properties": true
+        },
+        {
+            "label": "DEFINES",
+            "description": "A function or script defines a variable",
+            "properties": [],
+            "additional_properties": true
+        },
+        {
+            "label": "ASSIGNED_TO",
+            "description": "A variable is assigned to another variable which is defined in the same function or script",
+            "properties": [],
+            "additional_properties": true
+        }
+    ],
+    "patterns": [
+        ["Function", "CALLS", "Function"],
+        ["Function", "CALLS", "Script"],
+        ["Script", "CALLS", "Function"],
+        ["Script", "CALLS", "Script"],
+        ["Function", "USES", "Variable"],
+        ["Function", "DEFINES", "Variable"],
+        ["Variable", "ASSIGNED_TO", "Variable"]
+    ],
+    "additional_node_types": true,
+    "additional_relationship_types": true,
+    "additional_patterns": true
+}

@@ -78,6 +78,33 @@ class OllamaLLM(LLMInterface):
         messages.append(UserMessage(content=input).model_dump())
         return messages  # type: ignore
 
+    async def generate(
+        self,
+        prompt: str,
+        **kwargs: Any,
+    ) -> str:
+        """Generate text from a prompt.
+
+        Args:
+            prompt: The prompt to generate text from.
+            **kwargs: Additional parameters to pass to the LLM.
+
+        Returns:
+            The generated text.
+        """
+        messages = [{"role": "user", "content": prompt}]
+        try:
+            response = await self.async_client.chat(
+                model=self.model_name,
+                messages=messages,
+                options=self.model_params or {},
+                **kwargs,
+            )
+            return response["message"]["content"]
+        except Exception as e:
+            logger.error(f"Error generating text: {str(e)}")
+            raise
+
     def invoke(
         self,
         input: str,

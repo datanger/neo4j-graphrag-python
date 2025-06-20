@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 
-from neo4j_graphrag.embeddings.openai import OpenAIEmbeddings
+from neo4j_graphrag.embeddings.ollama import OllamaEmbeddings
 from neo4j_graphrag.experimental.components.embedder import TextChunkEmbedder
 from neo4j_graphrag.experimental.components.entity_relation_extractor import (
     LLMEntityRelationExtractor,
@@ -62,7 +62,7 @@ async def define_and_run_pipeline(
         FixedSizeSplitter(chunk_size=4000, chunk_overlap=200, approximate=False),
         "splitter",
     )
-    pipe.add_component(TextChunkEmbedder(embedder=OpenAIEmbeddings()), "chunk_embedder")
+    pipe.add_component(TextChunkEmbedder(embedder=OllamaEmbeddings(model_name="deepseek-coder:6.7b")), "chunk_embedder")
     pipe.add_component(SchemaBuilder(), "schema")
     pipe.add_component(
         LLMEntityRelationExtractor(
@@ -142,8 +142,8 @@ async def define_and_run_pipeline(
 
 
 async def main() -> PipelineResult:
-    llm = OpenAILLM(
-        model_name="gpt-4o",
+    llm = OllamaLLM(
+        model_name="deepseek-coder:6.7b",
         model_params={
             "max_tokens": 1000,
             "response_format": {"type": "json_object"},

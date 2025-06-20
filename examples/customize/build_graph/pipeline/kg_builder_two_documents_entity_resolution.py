@@ -36,7 +36,7 @@ from neo4j_graphrag.experimental.components.text_splitters.fixed_size_splitter i
     FixedSizeSplitter,
 )
 from neo4j_graphrag.experimental.pipeline import Pipeline
-from neo4j_graphrag.llm import LLMInterface, OpenAILLM
+from neo4j_graphrag.llm import LLMInterface, OllamaLLM
 
 
 async def define_and_run_pipeline(
@@ -137,8 +137,8 @@ async def define_and_run_pipeline(
 
 
 async def main() -> None:
-    llm = OpenAILLM(
-        model_name="gpt-4o",
+    llm = OllamaLLM(
+        model_name="deepseek-coder:6.7b",
         model_params={
             "max_tokens": 1000,
             "response_format": {"type": "json_object"},
@@ -147,9 +147,12 @@ async def main() -> None:
     driver = neo4j.GraphDatabase.driver(
         "bolt://localhost:7687", auth=("neo4j", "password")
     )
-    await define_and_run_pipeline(driver, llm)
-    driver.close()
-    await llm.async_client.close()
+    try:
+        await define_and_run_pipeline(driver, llm)
+    finally:
+        driver.close()
+        if hasattr(llm, 'async_client') and hasattr(llm.async_client, 'aclose'):
+            await llm.async_client.aclose()
 
 
 if __name__ == "__main__":
