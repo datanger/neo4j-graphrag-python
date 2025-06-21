@@ -177,6 +177,18 @@ class MatlabExtractor(LLMEntityRelationExtractor):
         # Reset state for new chunk
         self._reset_state()
 
+    def _node_exists(self, node_id: str) -> bool:
+        """Check if a node with the given ID already exists."""
+        return any(n.get('id') == node_id for n in self.nodes)
+    
+    def _add_node_if_not_exists(self, node_data: dict) -> None:
+        """Add a node only if it doesn't already exist."""
+        node_id = node_data.get('id')
+        if node_id and not self._node_exists(node_id):
+            self.nodes.append(node_data)
+        elif self.debug and node_id:
+            print(f"[DEBUG] Skipping duplicate node: {node_id}")
+
     def _ensure_neo4j_compatible(self, value):
         """Ensure value is Neo4j-compatible type"""
         if value is None:
@@ -225,7 +237,7 @@ class MatlabExtractor(LLMEntityRelationExtractor):
         script_name = os.path.basename(self.path)
         if script_name.endswith('.m'):
             script_id = f"script_{script_name}"
-            if not any(n.get('id') == script_id for n in self.nodes):
+            if not self._node_exists(script_id):
                 script_node = {
                     "id": script_id,
                     "label": "Script",
@@ -234,7 +246,7 @@ class MatlabExtractor(LLMEntityRelationExtractor):
                     "description": "",
                     "line_range": ("", 1, len(self.lines))
                 }
-                self.nodes.append(script_node)
+                self._add_node_if_not_exists(script_node)
                 
                 # Register script in global registry
                 if self.enable_post_processing:
@@ -254,6 +266,9 @@ class MatlabExtractor(LLMEntityRelationExtractor):
                     func_name = node.get('name')
                     if func_name:
                         _global_registry.register_function(func_name, node)
+        
+        # Clean up any remaining duplicates
+        self._cleanup_duplicates()
         
         # Create Neo4jGraph instance
         graph = Neo4jGraph()
@@ -556,7 +571,7 @@ class MatlabExtractor(LLMEntityRelationExtractor):
                 
             # Create variable node if it doesn't exist
             if not any(n.get('id') == var_id for n in self.nodes):
-                self.nodes.append({
+                self._add_node_if_not_exists({
                     'id': var_id,
                     'label': 'Variable',
                     'name': var_name,
@@ -651,7 +666,7 @@ class MatlabExtractor(LLMEntityRelationExtractor):
         self.function_parameters[func_id] = params
         
         # Add function node
-        self.nodes.append({
+        self._add_node_if_not_exists({
             "id": func_id,
             "label": "Function",
             "name": func_name,
@@ -672,26 +687,21 @@ class MatlabExtractor(LLMEntityRelationExtractor):
         try:
             # Process function parameters as variables in this scope
             for param in params:
-                if param and param not in IDENTIFIERS_TO_EXCLUDE:
-                    # Create variable node for the parameter
-                    var_id = f"var_{param}_{len(self.variable_definitions)}"
-                    self.variable_definitions[param] = (var_id, 'Function', func_id)
-                    
-                    # Add the variable node
-                    self.nodes.append({
-                        "id": var_id,
+                if not param or param in IDENTIFIERS_TO_EXCLUDE:
+                    continue
+                if param not in self.variable_definitions:
+                    var_node_id = f"var_{param}_{len(self.variable_definitions)}"
+                    self.variable_definitions[param] = (var_node_id, 'Function', func_id)
+                    self._add_node_if_not_exists({
+                        "id": var_node_id,
                         "label": "Variable",
                         "name": param,
                         "file_path": self.path,
-                        "line_range": [
-                            (f"parameter: {param}", f"{start_line}-{start_line}")
-                        ]
+                        "line_range": [("parameter", f"{start_line}-{start_line}")]
                     })
-                    
-                    # Add DEFINES relationship from function to parameter
                     self._add_edge(
                         source_id=func_id,
-                        target_id=var_id,
+                        target_id=var_node_id,
                         label="DEFINES",
                         properties={
                             "file": self.path,
@@ -699,6 +709,8 @@ class MatlabExtractor(LLMEntityRelationExtractor):
                             "type": "parameter_definition"
                         }
                     )
+                    if self.debug:
+                        print(f"  [+] Defined parameter: {param} in {func_id}")
             
             # Process function body
             self.current_function = func_id
@@ -767,22 +779,22 @@ class MatlabExtractor(LLMEntityRelationExtractor):
         code_snippet = '\n'.join(code_lines[:end_line])
         line_range = (code_snippet, 1, end_line)
         
+        # Add script node to the graph
+        self._add_node_if_not_exists({
+            "id": script_id,
+            "label": "Script",
+            "name": script_name,
+            "file_path": self.path,
+            "description": "",  # Will be filled by LLM later
+            "line_range": line_range
+        })
+        
         # Set up script scope
         prev_scope = self.current_scope
         self.current_scope = script_id
         self.variable_scopes.append(('script', script_id))
         
         try:
-            # Add script node to the graph
-            self.nodes.append({
-                "id": script_id,
-                "label": "Script",
-                "name": script_name,
-                "file_path": self.path,
-                "description": "",  # Will be filled by LLM later
-                "line_range": line_range
-            })
-            
             # Process variables in the script
             self._process_variables_in_code(
                 self.text, 
@@ -809,7 +821,7 @@ class MatlabExtractor(LLMEntityRelationExtractor):
             if param not in self.variable_definitions:
                 var_node_id = f"var_{param}_{len(self.variable_definitions)}"
                 self.variable_definitions[param] = (var_node_id, current_scope_type, current_scope)
-                self.nodes.append({
+                self._add_node_if_not_exists({
                     "id": var_node_id,
                     "label": "Variable",
                     "name": param,
@@ -865,7 +877,7 @@ class MatlabExtractor(LLMEntityRelationExtractor):
             global_match = re.match(r'^global\s+([a-zA-Z_][\w\s]*)', line)
             if global_match:
                 if not global_node_added:
-                    self.nodes.append({
+                    self._add_node_if_not_exists({
                         "id": "global",
                         "label": "GlobalScope",
                         "name": "global"
@@ -876,7 +888,7 @@ class MatlabExtractor(LLMEntityRelationExtractor):
                     if gvar not in self.variable_definitions:
                         var_node_id = f"var_{gvar}_{len(self.variable_definitions)}"
                         self.variable_definitions[gvar] = (var_node_id, 'global', 'global')
-                        self.nodes.append({
+                        self._add_node_if_not_exists({
                             "id": var_node_id,
                             "label": "Variable",
                             "name": gvar,
@@ -913,7 +925,7 @@ class MatlabExtractor(LLMEntityRelationExtractor):
                     scope_type = 'global' if is_global else current_scope_type
                     scope_id = 'global' if is_global else current_scope
                     self.variable_definitions[assigned_var] = (var_node_id, scope_type, scope_id)
-                    self.nodes.append({
+                    self._add_node_if_not_exists({
                         "id": var_node_id,
                         "label": "Variable",
                         "name": assigned_var,
@@ -1010,14 +1022,13 @@ class MatlabExtractor(LLMEntityRelationExtractor):
                             current_scope_type, 
                             current_scope
                         )
-                        if not any(n.get('id') == var_node_id for n in self.nodes):
-                            self.nodes.append({
-                                "id": var_node_id,
-                                "label": "Variable",
-                                "name": var_name,
-                                "file_path": file_path,
-                                "line_range": [(line.split('%')[0].strip(), f"{actual_line}-{actual_line}")]
-                            })
+                        self._add_node_if_not_exists({
+                            "id": var_node_id,
+                            "label": "Variable",
+                            "name": var_name,
+                            "file_path": file_path,
+                            "line_range": [(line.split('%')[0].strip(), f"{actual_line}-{actual_line}")]
+                        })
                         self._add_edge(
                             source_id=parent_id,
                             target_id=var_node_id,
@@ -1245,33 +1256,18 @@ class MatlabExtractor(LLMEntityRelationExtractor):
         return left
 
     def _add_edge(self, source_id: str, target_id: str, label: str, properties: dict = None, line_number: int = None) -> None:
-        """Add an edge to the graph if it doesn't already exist with the same properties."""
-        # Skip if source or target is None
+        """Add an edge to the graph if it doesn't already exist with the same source, target, and label."""
         if not source_id or not target_id:
             return
-            
-        # Create a unique key for this edge
-        edge_key = (source_id, target_id, label)
-        
-        # Initialize properties if not provided
         if properties is None:
             properties = {}
-            
-        # Add line number if provided
         if line_number is not None:
             properties['line_number'] = line_number
-            
-        # Check if we already have this exact edge
+        prop_line = properties.get('line_number')
         for edge in self.edges:
-            if (edge['source'] == source_id and 
-                edge['target'] == target_id and 
-                edge['label'] == label and 
-                edge['properties'].get('line_number') == properties.get('line_number')):
-                # Update properties if needed
+            if (edge['source'] == source_id and edge['target'] == target_id and edge['label'] == label and edge['properties'].get('line_number') == prop_line):
                 edge['properties'].update(properties)
                 return
-                
-        # Add new edge
         self.edges.append({
             'source': source_id,
             'target': target_id,
@@ -1418,3 +1414,29 @@ class MatlabExtractor(LLMEntityRelationExtractor):
         
         # Wrap in our custom result type
         return MatlabExtractionResult(graph=result)
+
+    def _cleanup_duplicates(self) -> None:
+        """Remove duplicate nodes and edges before creating the final graph."""
+        if self.debug:
+            original_node_count = len(self.nodes)
+            original_edge_count = len(self.edges)
+        # Remove duplicate nodes (keep first occurrence)
+        seen_node_ids = set()
+        unique_nodes = []
+        for node in self.nodes:
+            node_id = node.get('id')
+            if node_id and node_id not in seen_node_ids:
+                seen_node_ids.add(node_id)
+                unique_nodes.append(node)
+        self.nodes = unique_nodes
+        # Remove duplicate edges (keep first occurrence of (source, target, label, line_number))
+        seen_edges = set()
+        unique_edges = []
+        for edge in self.edges:
+            edge_key = (edge.get('source'), edge.get('target'), edge.get('label'), edge.get('properties', {}).get('line_number'))
+            if edge_key not in seen_edges:
+                seen_edges.add(edge_key)
+                unique_edges.append(edge)
+        self.edges = unique_edges
+        if self.debug:
+            print(f"[DEBUG] Cleaned up duplicates: {original_node_count} -> {len(self.nodes)} nodes, {original_edge_count} -> {len(self.edges)} edges")
