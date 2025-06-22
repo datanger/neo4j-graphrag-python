@@ -101,8 +101,8 @@ with open(Path(__file__).parent / "matlab_builtin_functions.json", "r") as f:
 
 COMMON_WORDS_TO_IGNORE = {
     "on", "off", "assign", "assigns", "define", "defines", "use", "uses",
-    "variable", "variables", "parameter", "parameters", "input", "inputs",
-    "output", "outputs", "script", "local", "global", "calculation", "value",
+    "variable", "variables", "parameter", "parameters",
+    "script", "local", "global", "calculation", "value",
     "test", "file", "path", "content", "line", "range", "preview",
     "dependencies", "generates", "description", "type", "id", "source",
     "target", "label", "node", "edge", "graph", "element", "elements",
@@ -518,235 +518,261 @@ class MatlabExtractor(LLMEntityRelationExtractor):
         self.defined_vars_in_current_file = set()
 
     def _create_uses_relationship_if_external(self, parent_id: str, var_name: str, var_id: str):
-        """Creates a USES relationship only if the variable is not defined in the current file."""
-        if var_name not in self.defined_vars_in_current_file:
-            if self.debug:
-                print(f"[DEBUG] Creating external USES for '{var_name}' from '{parent_id}'")
-            self._add_edge(parent_id, var_id, "USES")
-        elif self.debug:
-            print(f"[DEBUG] Skipping local USES for '{var_name}' from '{parent_id}'")
+        """Creates a USES relationship for external variables with proper scope handling."""
+        # Check if this variable is defined in a different scope
+        # For now, we'll create the USES relationship for all external variable usage
+        # The actual scope checking will be done during post-processing
+        if self.debug:
+            print(f"[DEBUG] Creating USES for '{var_name}' from '{parent_id}' to '{var_id}'")
+        self._add_edge(parent_id, var_id, "USES", properties={
+            "usage_type": "external_variable",
+            "variable_name": var_name
+        })
 
     def _process_variables_in_code(self, code: str, parent_id: str, file_path: str, line_offset: int = 0) -> None:
-        # First, strip all comments from the code block to avoid parsing them.
-        lines_with_comments = code.splitlines()
-        lines = [line.split('%')[0] for line in lines_with_comments]
-
-        # Pass 1: Find all variable definitions in the current code block and create DEFINES relationships.
-        assignment_pattern = r'^\s*([a-zA-Z_]\w*)\s*='
+        lines = code.splitlines()
+        first_code_line_index = -1
         for i, line in enumerate(lines):
-            # Also strip string literals to avoid parsing them as code
-            line_without_strings = re.sub(r"'.*?'", "''", line)
-            match = re.search(assignment_pattern, line_without_strings)
+            if line.strip() and not line.strip().startswith('%'):
+                first_code_line_index = i
+                break
+        if first_code_line_index == -1:
+            return
+        code = '\n'.join(lines[first_code_line_index:])
+        code = re.sub(r'%.*$', '', code, flags=re.MULTILINE)
+        code = re.sub(r'%\{.*?%\}', '', code, flags=re.DOTALL)
+        code = re.sub(r"'(?:''|[^'])*'", "''", code)
+        code = re.sub(r'"(?:""|[^"])*"', '""', code)
+        assignment_pattern = r'^\s*([a-zA-Z_]\w*)\s*=\s*(.+)'
+        usage_pattern = r'\b([a-zA-Z_]\w*)\b'
+        scope_vars = set()
+        for line in code.splitlines():
+            match = re.match(assignment_pattern, line)
             if match:
                 var_name = match.group(1)
-                if var_name not in IDENTIFIERS_TO_EXCLUDE:
-                    self.defined_vars_in_current_file.add(var_name)
-                    var_id = f"var_{var_name}"
+                rhs = match.group(2)
+                var_id = f"var_{var_name}_{parent_id}"
+                if var_name not in scope_vars:
+                    scope_vars.add(var_name)
                     if not self._node_exists(var_id):
-                        var_node = {"id": var_id, "label": "Variable", "name": var_name, "file_path": file_path}
+                        var_node = {
+                            "id": var_id,
+                            "label": "Variable",
+                            "name": var_name,
+                            "file_path": file_path,
+                            "scope_id": parent_id,
+                            "scope_type": "function" if "func_" in parent_id else "script"
+                        }
                         self._add_node_if_not_exists(var_node)
                     self._add_edge(parent_id, var_id, "DEFINES")
-
-        # Pass 2: Find all variable usages and create USES relationships for external variables.
-        usage_pattern = r'\b([a-zA-Z_]\w*)\b'
-        for i, line in enumerate(lines):
-            # Also strip string literals to avoid parsing them as code
-            line_without_strings = re.sub(r"'.*?'", "''", line)
-            # We look at the right-hand side of assignments, or the whole line if no assignment.
-            parts = line_without_strings.split('=')
-            search_area = parts[1] if len(parts) > 1 else parts[0]
-
-            # First, identify all function/script calls on the line to exclude them from variable processing.
-            calls_in_line = set()
-            call_pattern = r'\b([a-zA-Z_]\w*)\s*\('
-            for call_match in re.finditer(call_pattern, search_area):
-                calls_in_line.add(call_match.group(1))
-
-            for match in re.finditer(usage_pattern, search_area):
+                else:
+                    self._add_edge(parent_id, var_id, "MODIFIES")
+                for rhs_var in re.findall(usage_pattern, rhs):
+                    if rhs_var != var_name and rhs_var.lower() not in IDENTIFIERS_TO_EXCLUDE:
+                        rhs_var_id = f"var_{rhs_var}_{parent_id}"
+                        if not self._node_exists(rhs_var_id):
+                            rhs_var_node = {
+                                "id": rhs_var_id,
+                                "label": "Variable",
+                                "name": rhs_var,
+                                "file_path": file_path,
+                                "scope_id": parent_id,
+                                "scope_type": "function" if "func_" in parent_id else "script"
+                            }
+                            self._add_node_if_not_exists(rhs_var_node)
+                        self._add_edge(rhs_var_id, var_id, "ASSIGNED_TO")
+            calls_in_line = set(m.group(1) for m in re.finditer(r'\b([a-zA-Z_]\w*)\s*\(', line))
+            for func_call_match in re.finditer(r'\b([a-zA-Z_]\w*)\s*\([^)]*\)', line):
+                func_name = func_call_match.group(1)
+                if func_name.lower() not in IDENTIFIERS_TO_EXCLUDE:
+                    for node in self.nodes:
+                        if (node.get('label') == 'Function' and node.get('name') == func_name):
+                            if parent_id.startswith('script_'):
+                                self._add_edge(parent_id, node['id'], "CALLS", properties={
+                                    "call_type": "function_call",
+                                    "function_name": func_name
+                                })
+                                if self.debug:
+                                    print(f"[DEBUG] Created Script->Function CALLS from '{parent_id}' to function '{func_name}'")
+                            else:
+                                self._add_edge(parent_id, node['id'], "CALLS", properties={
+                                    "call_type": "function_call",
+                                    "function_name": func_name
+                                })
+                                if self.debug:
+                                    print(f"[DEBUG] Created CALLS from '{parent_id}' to function '{func_name}'")
+                            break
+            script_call_match = re.match(r'^\s*([a-zA-Z_]\w*)\s*;', line)
+            if script_call_match:
+                script_name = script_call_match.group(1)
+                if script_name.lower() not in IDENTIFIERS_TO_EXCLUDE:
+                    for node in self.nodes:
+                        if (node.get('label') == 'Script' and (node.get('name') == script_name or node.get('name') == script_name + '.m')):
+                            self._add_edge(parent_id, node['id'], "CALLS", properties={
+                                "call_type": "script_call",
+                                "script_name": script_name
+                            })
+                            if self.debug:
+                                print(f"[DEBUG] Created Script->Script CALLS from '{parent_id}' to script '{script_name}'")
+                            break
+            run_call_match = re.search(r"run\s*\(\s*['\"]([^'\"]+)['\"]\s*\)", line)
+            if run_call_match:
+                script_name = run_call_match.group(1)
+                if script_name.lower() not in IDENTIFIERS_TO_EXCLUDE:
+                    for node in self.nodes:
+                        if (node.get('label') == 'Script' and (node.get('name') == script_name or node.get('name') == script_name.replace('.m', ''))):
+                            self._add_edge(parent_id, node['id'], "CALLS", properties={
+                                "call_type": "run_call",
+                                "script_name": script_name
+                            })
+                            if self.debug:
+                                print(f"[DEBUG] Created Script->Script CALLS from '{parent_id}' to script '{script_name}' via run()")
+                            break
+            for match in re.finditer(usage_pattern, line):
                 var_name = match.group(1)
-
-                # If the identifier is a function/script call, skip it. It will be handled by the post-processor.
                 if var_name in calls_in_line:
                     continue
-
-                if var_name in IDENTIFIERS_TO_EXCLUDE or var_name in self.defined_vars_in_current_file:
+                if var_name.lower() in IDENTIFIERS_TO_EXCLUDE:
                     continue
-
-                var_id = f"var_{var_name}"
-                if not self._node_exists(var_id):
-                    var_node = {"id": var_id, "label": "Variable", "name": var_name, "file_path": file_path}
-                    self._add_node_if_not_exists(var_node)
-
-                # This new method call handles the logic internally
-                self._create_uses_relationship_if_external(parent_id, var_name, var_id)
+                var_id = f"var_{var_name}_{parent_id}"
+                if var_name not in scope_vars:
+                    # 改进跨作用域查找：优先查找其他 scope 的 variable 节点
+                    found_cross_scope = False
+                    # 先查找 script 作用域
+                    for node in self.nodes:
+                        if (node.get('label') == 'Variable' and
+                            node.get('name') == var_name and
+                            node.get('scope_id') != parent_id and
+                            node.get('scope_type') == 'script'):
+                            self._add_edge(parent_id, node['id'], "USES", properties={
+                                "usage_type": "cross_scope",
+                                "variable_name": var_name,
+                                "from_scope": parent_id,
+                                "to_scope": node.get('scope_id')
+                            })
+                            found_cross_scope = True
+                            if self.debug:
+                                print(f"[DEBUG] Created cross-scope USES for '{var_name}' from '{parent_id}' to '{node['id']}' (script scope)")
+                            break
+                    # 再查找 function 作用域
+                    if not found_cross_scope:
+                        for node in self.nodes:
+                            if (node.get('label') == 'Variable' and
+                                node.get('name') == var_name and
+                                node.get('scope_id') != parent_id and
+                                node.get('scope_type') == 'function'):
+                                self._add_edge(parent_id, node['id'], "USES", properties={
+                                    "usage_type": "cross_scope",
+                                    "variable_name": var_name,
+                                    "from_scope": parent_id,
+                                    "to_scope": node.get('scope_id')
+                                })
+                                found_cross_scope = True
+                                if self.debug:
+                                    print(f"[DEBUG] Created cross-scope USES for '{var_name}' from '{parent_id}' to '{node['id']}' (function scope)")
+                                break
+                    # 最后查找其他任何不同 scope
+                    if not found_cross_scope:
+                        for node in self.nodes:
+                            if (node.get('label') == 'Variable' and
+                                node.get('name') == var_name and
+                                node.get('scope_id') != parent_id):
+                                self._add_edge(parent_id, node['id'], "USES", properties={
+                                    "usage_type": "cross_scope",
+                                    "variable_name": var_name,
+                                    "from_scope": parent_id,
+                                    "to_scope": node.get('scope_id')
+                                })
+                                found_cross_scope = True
+                                if self.debug:
+                                    print(f"[DEBUG] Created cross-scope USES for '{var_name}' from '{parent_id}' to '{node['id']}'")
+                                break
+                    if not found_cross_scope:
+                        if not self._node_exists(var_id):
+                            var_node = {
+                                "id": var_id,
+                                "label": "Variable",
+                                "name": var_name,
+                                "file_path": file_path,
+                                "scope_id": parent_id,
+                                "scope_type": "function" if "func_" in parent_id else "script"
+                            }
+                            self._add_node_if_not_exists(var_node)
+                        self._add_edge(parent_id, var_id, "USES", properties={
+                            "usage_type": "external_variable",
+                            "variable_name": var_name
+                        })
+                        if self.debug:
+                            print(f"[DEBUG] Created USES for external variable '{var_name}' from '{parent_id}' to '{var_id}'")
 
     def _parse_matlab_code(self) -> None:
-        """Parse MATLAB code to extract entities and relationships."""
         if not self.text.strip():
             return
-
-        # First, find all function definitions in the file
         function_pattern = re.compile(
             r'^\s*function\s+(?:\[?([\w\s,]*)\]?\s*=\s*)?(\w+)\s*(?:\(([^)]*)\))?',
             re.MULTILINE
         )
-
-        # Find all function matches
         function_matches = list(function_pattern.finditer(self.text))
-
-        if not function_matches:
-            # No functions found, treat as a script
-            self._parse_script()
+        script_name = os.path.basename(self.path)
+        script_id = f"script_{script_name}"
+        if not self._node_exists(script_id):
+            script_node = {"id": script_id, "label": "Script", "name": script_name, "file_path": self.path}
+            self._add_node_if_not_exists(script_node)
+        # 先处理所有函数定义，确保 Function 节点已创建
+        for match in function_matches:
+            start_pos = match.start()
+            end_pos = function_matches[function_matches.index(match)+1].start() if function_matches.index(match)+1 < len(function_matches) else len(self.text)
+            func_code = self.text[start_pos:end_pos]
+            original_text = self.text
+            self.text = func_code
+            try:
+                self._parse_function()
+            except Exception as e:
+                print(f"Error parsing function at position {start_pos}: {str(e)}")
+            finally:
+                self.text = original_text
+        # 再处理脚本体
+        if function_matches:
+            script_code = self.text[:function_matches[0].start()].strip()
+            if script_code:
+                self._process_variables_in_code(
+                    script_code,
+                    script_id,
+                    self.path,
+                    0
+                )
         else:
-            # Process each function
-            for i, match in enumerate(function_matches):
-                # Get the function's code block
-                start_pos = match.start()
-                end_pos = function_matches[i+1].start() if i+1 < len(function_matches) else len(self.text)
-                func_code = self.text[start_pos:end_pos]
-
-                # Save current text and set to function code
-                original_text = self.text
-                self.text = func_code
-
-                try:
-                    # Parse the function
-                    self._parse_function()
-                except Exception as e:
-                    print(f"Error parsing function at position {start_pos}: {str(e)}")
-                finally:
-                    # Restore original text
-                    self.text = original_text
-
-        # Extract variables and relationships
+            self._parse_script()
         self._extract_variables_and_relationships()
 
-    def _extract_variables_and_relationships(self) -> None:
-        """Extract variables and their relationships from the parsed code.
-
-        This method processes the collected variable definitions, occurrences, and dependencies
-        to create appropriate nodes and edges in the graph.
-        """
-        if self.debug:
-            print("Extracting variables and relationships...")
-            print(f"Found {len(self.variable_definitions)} variable definitions")
-
-        # Process each variable definition
-        for var_name, (var_id, scope_type, scope_id) in self.variable_definitions.items():
-            if var_name in IDENTIFIERS_TO_EXCLUDE:
-                continue
-
-            # Create variable node if it doesn't exist
-            if not any(n.get('id') == var_id for n in self.nodes):
-                self._add_node_if_not_exists({
-                    'id': var_id,
-                    'label': 'Variable',
-                    'name': var_name,
-                    'scope_type': scope_type.lower(),
-                    'scope_id': scope_id,
-                    'file_path': self.path,
-                })
-
-            # Add DEFINES or ASSIGNED_TO relationship from scope to variable
-            if scope_type.lower() == 'function':
-                self._add_edge(
-                    source_id=scope_id,
-                    target_id=var_id,
-                    label='DEFINES',
-                    properties={'type': 'parameter' if var_name in self.function_parameters.get(scope_id, []) else 'local'}
-                )
-            elif scope_type.lower() == 'script':  # Only for script-level variables
-                self._add_edge(
-                    source_id=scope_id,
-                    target_id=var_id,
-                    label='DEFINES',
-                    properties={'type': 'variable_definition'}
-                )
-            # Do not create ASSIGNED_TO for global variables
-
-        # Process variable dependencies (USES relationships)
-        for var_name, deps in self.variable_dependencies.items():
-            if var_name not in self.variable_definitions:
-                continue
-
-            var_id = self.variable_definitions[var_name][0]
-            for dep_var in deps:
-                if dep_var in self.variable_definitions and dep_var not in IDENTIFIERS_TO_EXCLUDE:
-                    dep_id = self.variable_definitions[dep_var][0]
-                    self._add_edge(
-                        source_id=var_id,
-                        target_id=dep_id,
-                        label='USES',
-                        properties={'type': 'dependency'}
-                    )
-
-        # Process script calls
-        for caller_id, script_name in self.script_calls:
-            # Find the script node
-            script_node = next((n for n in self.nodes
-                             if n.get('name') == script_name
-                             and n.get('label') == 'Script'), None)
-
-            if script_node:
-                self._add_edge(
-                    source_id=caller_id,
-                    target_id=script_node['id'],
-                    label='CALLS',
-                    properties={'type': 'script_call'}
-                )
-
-        if self.debug:
-            print(f"Extracted {len(self.nodes)} nodes and {len(self.edges)} edges")
+        # 后处理：建立跨作用域的 USES 关系
+        self._establish_cross_scope_relationships()
 
     def _parse_function(self) -> None:
-        """Parse a MATLAB function definition.
-
-        Extracts the function signature, parameters, return values, and code snippet.
-        Creates a function node with appropriate metadata and stores it in the graph.
-        """
-        # Extract function signature using regex
         func_match = re.search(
             r'^\s*function\s+(?:\[?([\w\s,]*)\]?\s*=\s*)?(\w+)\s*(?:\(([^)]*)\))?',
             self.text,
             re.MULTILINE
         )
-
         if not func_match:
-            # If no function signature is found, treat as a script
             self._parse_script()
             return
-
-        # Extract return variables, function name, and parameters
         return_vars = [v.strip() for v in func_match.group(1).split(',')] if func_match.group(1) else []
         func_name = func_match.group(2)
         params = [p.strip() for p in func_match.group(3).split(',')] if func_match.group(3) else []
-
-        # Get line range and code snippet
+        if self.debug:
+            print(f"[DEBUG] Parsed function parameters for '{func_name}': {params}")
         start_line = self.text.count('\n', 0, func_match.start()) + 1
         end_line = self.text.count('\n') + 1
         func_code = self._get_function_code_snippet(func_match)
-
-        # Create function ID
         func_id = f"func_{func_name}_{len(self.nodes)}"
-
-        # --- Create DEFINES relationship from Script to Function ---
-        # The script is the file that contains this function definition.
         script_name = os.path.basename(self.path)
         script_id = f"script_{script_name}"
-
-        # Ensure the script node exists
         if not self._node_exists(script_id):
             script_node = {"id": script_id, "label": "Script", "name": script_name, "file_path": self.path}
             self._add_node_if_not_exists(script_node)
-
-        # Add the DEFINES relationship
         self._add_edge(script_id, func_id, "DEFINES")
-        # -----------------------------------------------------------
-
-        # Store function parameters for later use
         self.function_parameters[func_id] = params
-
-        # Add function node
         self._add_node_if_not_exists({
             "id": func_id,
             "label": "Function",
@@ -757,61 +783,63 @@ class MatlabExtractor(LLMEntityRelationExtractor):
             ],
             "parameters": params,
             "returns": return_vars,
-            "description": ""  # Will be filled in by LLM later
+            "description": ""
         })
-
-        # Set up scope tracking
         prev_scope = self.current_scope
         self.current_scope = func_id
         self.variable_scopes.append(('function', func_id))
-
         try:
-            # Process function parameters as variables in this scope
             for param in params:
-                if not param or param in IDENTIFIERS_TO_EXCLUDE:
+                if self.debug:
+                    print(f"[DEBUG] Processing parameter: '{param}' for function '{func_id}'")
+                if not param or param.lower() in MATLAB_KEYWORDS:
+                    if self.debug:
+                        print(f"[DEBUG] Skipping parameter '{param}' due to exclusion check")
+                        if param.lower() in MATLAB_KEYWORDS:
+                            print(f"[DEBUG] '{param}' is in MATLAB_KEYWORDS")
+                        if param.lower() in MATLAB_BUILTINS:
+                            print(f"[DEBUG] '{param}' is in MATLAB_BUILTINS")
+                        if param.lower() in COMMON_WORDS_TO_IGNORE:
+                            print(f"[DEBUG] '{param}' is in COMMON_WORDS_TO_IGNORE")
                     continue
-
-                # FIX: Register the parameter as defined within this file's scope
-                # This prevents the creation of a redundant "USES" relationship later.
-                self.defined_vars_in_current_file.add(param)
-
-                if param not in self.variable_definitions:
-                    var_node_id = f"var_{param}_{len(self.variable_definitions)}"
-                    self.variable_definitions[param] = (var_node_id, 'Function', func_id)
+                param_key = (param, func_id)
+                param_var_id = f"var_{param}_{func_id}"
+                self.defined_vars_in_current_file.add(param_key)
+                self.variable_definitions[param_key] = (param_var_id, 'Function', func_id)
+                # 确保参数节点有正确的 scope_id 属性
+                if not self._node_exists(param_var_id):
                     self._add_node_if_not_exists({
-                        "id": var_node_id,
+                        "id": param_var_id,
                         "label": "Variable",
                         "name": param,
                         "file_path": self.path,
-                        "line_range": [("parameter", f"{start_line}-{start_line}")]
+                        "scope_id": func_id,  # 确保 scope_id 是 func_id
+                        "scope_type": "function"
                     })
-                    self._add_edge(
-                        source_id=func_id,
-                        target_id=var_node_id,
-                        label="DEFINES",
-                        properties={
-                            "file": self.path,
-                            "line": start_line,
-                            "type": "parameter_definition"
-                        }
-                    )
                     if self.debug:
-                        print(f"  [+] Defined parameter: {param} in {func_id}")
-
-            # Process function body
+                        print(f"[DEBUG] Created parameter variable node: {param_var_id} for param '{param}' in function '{func_id}'")
+                # 添加 DEFINES 关系从函数到参数
+                self._add_edge(
+                    source_id=func_id,
+                    target_id=param_var_id,
+                    label="DEFINES",
+                    properties={
+                        "file": self.path,
+                        "line": start_line,
+                        "type": "parameter_definition"
+                    }
+                )
+                if self.debug:
+                    print(f"  [+] Defined parameter: {param} in {func_id}")
             self.current_function = func_id
             self.known_function_names.add(func_name)
-
-            # Process variables in the function body
             self._process_variables_in_code(
                 func_code,
                 func_id,
                 self.path,
-                start_line - 1  # Convert to 0-based line number
+                start_line - 1
             )
-
         finally:
-            # Restore previous scope
             self.current_scope = prev_scope
             if self.variable_scopes and self.variable_scopes[-1][1] == func_id:
                 self.variable_scopes.pop()
@@ -1113,3 +1141,175 @@ class MatlabExtractor(LLMEntityRelationExtractor):
         self.edges = unique_edges
         if self.debug:
             print(f"[DEBUG] Cleaned up duplicates: {original_node_count} -> {len(self.nodes)} nodes, {original_edge_count} -> {len(self.edges)} edges")
+
+    def _extract_variables_and_relationships(self) -> None:
+        """Extract variables and their relationships from the parsed code.
+        This method processes the collected variable definitions, occurrences, and dependencies
+        to create appropriate nodes and edges in the graph.
+        """
+        if self.debug:
+            print("Extracting variables and relationships...")
+            print(f"Found {len(self.variable_definitions)} variable definitions")
+
+        # Process each variable definition
+        for (var_name, scope_id), (var_id, scope_type, scope_id2) in self.variable_definitions.items():
+            if var_name in IDENTIFIERS_TO_EXCLUDE:
+                continue
+            # Create variable node if it doesn't exist
+            if not any(n.get('id') == var_id for n in self.nodes):
+                self._add_node_if_not_exists({
+                    'id': var_id,
+                    'label': 'Variable',
+                    'name': var_name,
+                    'scope_type': scope_type.lower(),
+                    'scope_id': scope_id,  # 确保 scope_id 在 properties 中
+                    'file_path': self.path,
+                })
+            # Add DEFINES relationship from scope to variable
+            if scope_type.lower() == 'function':
+                self._add_edge(
+                    source_id=scope_id,
+                    target_id=var_id,
+                    label='DEFINES',
+                    properties={'type': 'parameter' if (var_name, scope_id) in self.variable_definitions else 'local'}
+                )
+            elif scope_type.lower() == 'script':
+                self._add_edge(
+                    source_id=scope_id,
+                    target_id=var_id,
+                    label='DEFINES',
+                    properties={'type': 'variable_definition'}
+                )
+        # 变量依赖关系（如有）
+        for (var_name, scope_id), deps in getattr(self, 'variable_dependencies', {}).items():
+            if (var_name, scope_id) not in self.variable_definitions:
+                continue
+            var_id = self.variable_definitions[(var_name, scope_id)][0]
+            for dep_var, dep_scope in deps:
+                if (dep_var, dep_scope) in self.variable_definitions and dep_var not in IDENTIFIERS_TO_EXCLUDE:
+                    dep_id = self.variable_definitions[(dep_var, dep_scope)][0]
+                    self._add_edge(
+                        source_id=var_id,
+                        target_id=dep_id,
+                        label='USES',
+                        properties={'type': 'dependency'}
+                    )
+        if self.debug:
+            print(f"Extracted {len(self.nodes)} nodes and {len(self.edges)} edges")
+
+    def _establish_cross_scope_relationships(self) -> None:
+        """Establish cross-scope USES relationships after all nodes are created."""
+        if self.debug:
+            print("[DEBUG] Establishing cross-scope relationships...")
+
+        # 获取当前文件中的所有变量节点
+        current_file_vars = []
+        for node in self.nodes:
+            if (node.get('label') == 'Variable' and
+                node.get('file_path') == self.path):
+                current_file_vars.append(node)
+
+        # 获取全局注册表中的所有变量节点
+        all_vars = []
+        for node in _global_registry.all_nodes:
+            if node.get('label') == 'Variable':
+                all_vars.append(node)
+
+        # 为当前文件中的每个变量使用查找跨作用域的定义
+        for current_var in current_file_vars:
+            var_name = current_var.get('name')
+            current_scope = current_var.get('scope_id')
+
+            # 查找其他作用域中同名的变量
+            for other_var in all_vars:
+                if (other_var.get('name') == var_name and
+                    other_var.get('scope_id') != current_scope and
+                    other_var.get('file_path') != self.path):  # 确保是不同文件
+
+                    # 检查是否已经存在这个关系
+                    existing_edge = next(
+                        (edge for edge in self.edges
+                         if (edge['source'] == current_scope and
+                             edge['target'] == other_var['id'] and
+                             edge['label'] == 'USES')),
+                        None
+                    )
+
+                    if not existing_edge:
+                        self._add_edge(current_scope, other_var['id'], "USES", properties={
+                            "usage_type": "cross_scope",
+                            "variable_name": var_name,
+                            "from_scope": current_scope,
+                            "to_scope": other_var.get('scope_id'),
+                            "cross_file": True
+                        })
+                        if self.debug:
+                            print(f"[DEBUG] Created cross-file cross-scope USES: {current_scope} -> {other_var['id']} ({var_name})")
+
+        # 建立 Script -> Script CALLS 关系
+        self._establish_script_to_script_calls()
+
+    def _establish_script_to_script_calls(self) -> None:
+        """Establish Script -> Script CALLS relationships."""
+        if self.debug:
+            print("[DEBUG] Establishing Script -> Script CALLS relationships...")
+
+        # 获取当前文件中的所有脚本节点
+        current_scripts = []
+        for node in self.nodes:
+            if (node.get('label') == 'Script' and
+                node.get('file_path') == self.path):
+                current_scripts.append(node)
+
+        # 获取全局注册表中的所有脚本节点
+        all_scripts = []
+        for node in _global_registry.all_nodes:
+            if node.get('label') == 'Script':
+                all_scripts.append(node)
+
+        # 检查当前文件中的脚本调用
+        for current_script in current_scripts:
+            script_name = current_script.get('name')
+            current_script_id = current_script.get('id')
+
+            # 查找被调用的脚本
+            for other_script in all_scripts:
+                other_script_name = other_script.get('name')
+                if (other_script_name != script_name and
+                    other_script.get('file_path') != self.path):
+
+                    # 检查是否已经存在这个关系
+                    existing_edge = next(
+                        (edge for edge in self.edges
+                         if (edge['source'] == current_script_id and
+                             edge['target'] == other_script['id'] and
+                             edge['label'] == 'CALLS')),
+                        None
+                    )
+
+                    if not existing_edge:
+                        # 检查是否在当前文件中调用了其他脚本
+                        if self._script_calls_other_script(script_name, other_script_name):
+                            self._add_edge(current_script_id, other_script['id'], "CALLS", properties={
+                                "call_type": "script_call",
+                                "script_name": other_script_name,
+                                "cross_file": True
+                            })
+                            if self.debug:
+                                print(f"[DEBUG] Created Script -> Script CALLS: {current_script_id} -> {other_script['id']} ({other_script_name})")
+
+    def _script_calls_other_script(self, caller_name: str, callee_name: str) -> bool:
+        """Check if a script calls another script."""
+        # 检查直接调用 (script_name;)
+        if f"{callee_name};" in self.text:
+            return True
+
+        # 检查 run('script_name.m') 调用
+        if f"run('{callee_name}.m')" in self.text or f'run("{callee_name}.m")' in self.text:
+            return True
+
+        # 检查 run('script_name') 调用（不带 .m）
+        if f"run('{callee_name}')" in self.text or f'run("{callee_name}")' in self.text:
+            return True
+
+        return False

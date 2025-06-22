@@ -19,7 +19,7 @@ end
 
 % Process the data using the config
 % Creates USES relationship with result and all variables used in process_data
-result = process_data(data, config.parameters);  
+result = process_data(data, config.parameters);
 
 % Display results with formatting
 fprintf('Processing complete. Result: %.2f\n', result);
@@ -28,7 +28,7 @@ fprintf('Processing complete. Result: %.2f\n', result);
 function output = process_data(input_data, params)
     % This function creates USES relationships with input_data and params
     output = input_data * params.threshold;
-    
+
     % Using a variable from the parent workspace
     % This creates a USES relationship with config
     if isfield(config, 'debug_mode') && config.debug_mode
