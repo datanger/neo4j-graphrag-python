@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import os
 import asyncio
+import json
+import logging
 from typing import List, Dict, Any, Optional, Union, Tuple
 from pathlib import Path
 import json
@@ -26,6 +28,14 @@ import logging
 from datetime import datetime
 import numpy as np
 from typing import List, Optional, Union
+import sys
+
+# Add comprehensive logging to see all steps
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    stream=sys.stdout
+)
 
 import asyncio
 import neo4j
@@ -156,7 +166,7 @@ SCHEMA = GraphSchema(
         ),
         RelationshipType(
             label="DEFINES",
-            description="A function or script defines a variable",
+            description="A script defines a variable or a function and a function defines a variable",
         ),
         RelationshipType(
             label="ASSIGNED_TO",
@@ -176,6 +186,7 @@ SCHEMA = GraphSchema(
         ("Script", "USES", "Variable"),
         ("Function", "DEFINES", "Variable"),
         ("Script", "DEFINES", "Variable"),
+        ("Script", "DEFINES", "Function"),
         ("Function", "MODIFIES", "Variable"),
         ("Script", "MODIFIES", "Variable"),
         ("Variable", "ASSIGNED_TO", "Variable"),
@@ -270,15 +281,15 @@ def convert_to_native(value):
     try:
         if value is None:
             return None
-        
+
         # Handle numpy and other numeric types
         if hasattr(value, 'item') and hasattr(value, 'dtype'):
             value = value.item()  # Convert numpy scalar to Python native
-        
+
         # Handle basic types
         if isinstance(value, bool):
             return value
-        
+
         # Handle string type
         if isinstance(value, str):
             # Try to convert to number if it looks like a number
@@ -291,51 +302,51 @@ def convert_to_native(value):
                 return int(value)
             except (ValueError, TypeError):
                 return value
-        
+
         # Handle numeric types - ensure they're native Python types
         if isinstance(value, (int, float)):
             # Convert to int if it's a whole number, otherwise float
             if float(value).is_integer():
                 return int(value)
             return float(value)
-        
+
         # Handle numpy numeric types
         if 'numpy' in str(type(value)) and hasattr(value, 'item'):
             try:
                 return convert_to_native(value.item())
             except:
                 pass
-        
+
         # Handle lists and tuples
         if isinstance(value, (list, tuple)):
             return [convert_to_native(x) for x in value]
-        
+
         # Handle dictionaries
         if isinstance(value, dict):
             return {str(k): convert_to_native(v) for k, v in value.items()}
-        
+
         # Handle datetime objects
         if hasattr(value, 'isoformat'):
             return value.isoformat()
-            
+
         # Try to convert to a basic type
         try:
             # Try to get a primitive representation
             if hasattr(value, '__dict__'):
                 return {str(k): convert_to_native(v) for k, v in value.__dict__.items()}
-            
+
             # Try to convert to string as last resort
             str_val = str(value)
             if str_val != str(type(value)):  # Only return if it's a meaningful string representation
                 return str_val
-                
+
             # If we get here, the default string representation isn't helpful
             return None
-            
+
         except Exception as e:
             print(f"Warning: Could not convert value {value} of type {type(value)}: {e}")
             return None
-            
+
     except Exception as e:
         print(f"Error in convert_to_native for value {value} of type {type(value)}: {e}")
         return None
@@ -345,11 +356,11 @@ def convert_value(value):
     try:
         original_type = type(value).__name__
         converted = convert_to_native(value)
-        
+
         # Log conversion if the type changed
         if converted is not None and str(converted) != str(value):
             print(f"  Converted {original_type}: {value!r} -> {type(converted).__name__}: {converted!r}")
-        
+
         return converted
     except Exception as e:
         print(f"Error converting value {value!r} of type {type(value)}: {e}")
@@ -363,17 +374,17 @@ def validate_properties(properties, context):
     """Validate and convert properties to Neo4j-compatible types."""
     if not properties:
         return {}
-        
+
     valid_props = {}
     for key, value in properties.items():
         try:
             # Skip None values
             if value is None:
                 continue
-                
+
             # Convert the value
             converted = convert_value(value)
-            
+
             # Check for problematic types
             if converted is not None:
                 if isinstance(converted, (list, tuple, dict)):
@@ -384,20 +395,20 @@ def validate_properties(properties, context):
                         if isinstance(v, dict):
                             return all(isinstance(k, str) and check_nested(x) for k, x in v.items())
                         return isinstance(v, (str, int, float, bool, type(None)))
-                    
+
                     if not check_nested(converted):
                         print(f"  WARNING: {context} has non-serializable nested type in property '{key}': {converted}")
                         converted = str(converted)
-                
+
                 valid_props[key] = converted
-            
+
         except Exception as e:
             print(f"  ERROR: Failed to convert {context} property '{key}': {e}")
             try:
                 valid_props[key] = str(value)
             except:
                 print(f"  ERROR: Could not stringify property '{key}', skipping")
-    
+
     return valid_props
 
 
@@ -405,14 +416,14 @@ def ensure_neo4j_compatible(value, path=''):
     """Ensure a value is Neo4j-compatible, converting if necessary."""
     if value is None:
         return None
-        
+
     # Handle numpy and other numeric types
     if hasattr(value, 'item') and hasattr(value, 'dtype'):
         try:
             return ensure_neo4j_compatible(value.item(), path)
         except Exception:
             return str(value)
-    
+
     # Handle standard Python types
     if isinstance(value, (bool, np.bool_)):
         return bool(value)
@@ -435,7 +446,7 @@ def ensure_neo4j_compatible(value, path=''):
 
 class MockLLM:
     """Mock LLM for demonstration purposes."""
-    
+
     async def generate(self, prompt: str) -> str:
         """Return a mock description."""
         return "Mock description generated by LLM"
@@ -446,60 +457,65 @@ async def process_matlab_files(directory: str, llm: LLMInterface) -> 'MatlabExtr
     # Initialize the extractor with the LLM
     # extractor = LLMEntityRelationExtractor(llm=llm, prompt_template=CodeExtractionTemplate())
     extractor = MatlabExtractor(llm=llm)
-    
+
     # Find all .m files in the directory
     matlab_files = list(Path(directory).rglob("*.m"))
-    
+
     # Initialize result with empty graph
     result_graph = Neo4jGraph()
-    
+
     # Process each file individually
     for file_path in matlab_files:
         # Read the file content
         with open(file_path, 'r', encoding='utf-8') as f:
             content = f.read()
-        
+
         # Create a text chunk with required fields
         chunk = TextChunk(
             text=content,
             index=0,
             metadata={"file_path": str(file_path.relative_to(directory)), "file_name": file_path.name, "code_type": "matlab"}
         )
-        
+
         # Create document info with required path field for this file
         doc_info = DocumentInfo(
             path=str(file_path.relative_to(directory)),
             metadata={"name": file_path.name}
         )
-        
-        # Process the current file
+
+        # Process the current file, but disable post-processing inside the loop
         file_result = await extractor.run(
             chunks=TextChunks(chunks=[chunk]),
             schema=SCHEMA,
             document_info=doc_info,
             lexical_graph_config=LexicalGraphConfig(),
             examples=EXAMPLES,
+            enable_post_processing=False,
         )
-        
+
         # Merge the results
         if file_result and hasattr(file_result, 'graph') and file_result.graph:
             result_graph.nodes.extend(file_result.graph.nodes)
             result_graph.relationships.extend(file_result.graph.relationships)
-    
+
+    # After processing all files, run the post-processing step once on the aggregated graph
+    print("Applying final cross-file relationship post-processing...")
+    final_graph = MatlabExtractor.post_process_cross_file_relationships(result_graph)
+
     # Return the combined result graph
-    result = type('Result', (), {'graph': result_graph})()
-    
+    result = type('Result', (), {'graph': final_graph})()
+
     # Process all nodes with detailed validation
     for i, node in enumerate(result.graph.nodes):
         if not hasattr(node, 'properties'):
             print(f"Node {i} has no properties")
             node.properties = {}
             continue
-            
+
         node_id = getattr(node, 'id', f'node_{i}')
         node_label = getattr(node, 'label', 'UNKNOWN')
         print(f"\nValidating node {i} ({node_label}): {node_id}")
-        
+
         # Convert line_range if it exists
         if 'line_range' in node.properties:
             try:
@@ -515,68 +531,64 @@ async def process_matlab_files(directory: str, llm: LLMInterface) -> 'MatlabExtr
                     print(f"  Warning: Unexpected line_range format: {type(line_ranges)}")
             except Exception as e:
                 print(f"  Error processing line_range: {e}")
-        
+
         # Validate and convert all properties
         node.properties = validate_properties(node.properties, f"node {node_id}")
-    
+
     # Process all relationships with detailed validation
     for i, rel in enumerate(result.graph.relationships):
         if not hasattr(rel, 'properties'):
             print(f"Relationship {i} has no properties")
             rel.properties = {}
             continue
-            
+
         rel_type = getattr(rel, 'type', 'UNKNOWN')
         rel_id = f"{getattr(rel, 'start_node_id', '?')} -[{rel_type}]-> {getattr(rel, 'end_node_id', '?')}"
         print(f"\nValidating relationship {i}: {rel_id}")
-        
+
         # Validate and convert all properties
         rel.properties = validate_properties(rel.properties, f"relationship {i}")
-    
+
     return result
 
 async def main():
     # Initialize LLM
     llm = MockLLM()
-    
+
     # Directory containing MATLAB files
     matlab_dir = "tests/matlab_test/examples"
-    # matlab_dir = "/home/niejie/work/Code/tools/transformer-models"
-    
-    # Process MATLAB files and get the extraction result
-    result = await process_matlab_files(matlab_dir, llm)
-    graph = result.graph  # Access the Neo4jGraph from the result
-    print(f"Extracted graph with {len(graph.nodes)} nodes and {len(graph.relationships)} relationships")
-    
+
     # Neo4j connection settings
     NEO4J_URI = "bolt://localhost:7687"
     NEO4J_USER = "neo4j"
     NEO4J_PASSWORD = "password"
     NEO4J_DB = "neo4j"
-    
+
+    driver = None  # Initialize driver to None
     try:
         # Initialize Neo4j driver
         driver = neo4j.GraphDatabase.driver(
             NEO4J_URI,
             auth=(NEO4J_USER, NEO4J_PASSWORD)
         )
-        
-        # Test the connection and verify database exists
-        with driver.session(database="system") as session:
-            result = session.run(
-                "SHOW DATABASES WHERE name = $db_name", 
-                {"db_name": NEO4J_DB}
-            )
-            if not result.single():
-                print(f"Database '{NEO4J_DB}' does not exist. Creating it...")
-                session.run(f"CREATE DATABASE {NEO4J_DB}")
-        
+
+        # --- Clear the database before writing ---
+        print("Connecting to Neo4j to clear the database...")
+        with driver.session(database=NEO4J_DB) as session:
+            session.run("MATCH (n) DETACH DELETE n")
+        print("Database cleared successfully.")
+
+        # Process MATLAB files and get the extraction result
+        result = await process_matlab_files(matlab_dir, llm)
+        graph = result.graph  # Access the Neo4jGraph from the result
+        print(f"Extracted graph with {len(graph.nodes)} nodes and {len(graph.relationships)} relationships")
+
         # Initialize Neo4j writer
         writer = Neo4jWriter(
             driver=driver,
             neo4j_database=NEO4J_DB
         )
-        
+
         # Convert graph nodes and relationships to dictionaries
         nodes = []
         relationships = []
@@ -592,7 +604,7 @@ async def main():
                         properties[k] = ensure_neo4j_compatible(v, f"node.{node_dict.get('id', '?')}.{k}")
                     except Exception as e:
                         print(f"Error processing node {node_dict.get('id', '?')} property '{k}': {e}")
-                
+
                 # Create a clean node dictionary
                 clean_node = {
                     'id': str(node_dict.get('id', '')),
@@ -602,7 +614,7 @@ async def main():
                 nodes.append(clean_node)
             except Exception as e:
                 print(f"Error processing node {getattr(node, 'id', '?')}: {e}")
-        
+
         # Process relationships with property validation
         for rel in graph.relationships:
             try:
@@ -614,7 +626,7 @@ async def main():
                         properties[k] = ensure_neo4j_compatible(v, f"rel.{rel_dict.get('start_node_id', '?')}-{rel_dict.get('type', '?')}->{rel_dict.get('end_node_id', '?')}.{k}")
                     except Exception as e:
                         print(f"Error processing relationship property '{k}': {e}")
-                
+
                 # Create a clean relationship dictionary
                 clean_rel = {
                     'start_node_id': str(rel_dict.get('start_node_id', '')),
@@ -625,12 +637,12 @@ async def main():
                 relationships.append(clean_rel)
             except Exception as e:
                 print(f"Error processing relationship: {e}")
-        
+
         print(f"Processed {len(nodes)} nodes and {len(relationships)} relationships with Neo4j-compatible types")
-        
+
         # Create a clean Neo4jGraph object with validated data
         from neo4j_graphrag.experimental.components.types import Neo4jGraph, Neo4jNode, Neo4jRelationship
-        
+
         # Create Neo4jNode objects
         print("Creating Neo4j nodes and relationships...")
         neo4j_nodes = []
@@ -644,7 +656,7 @@ async def main():
                 neo4j_nodes.append(neo4j_node)
             except Exception as e:
                 print(f"Error creating Neo4j node {node.get('id', '?')}: {e}")
-        
+
         # Create Neo4jRelationship objects
         neo4j_relationships = []
         for rel in relationships:
@@ -659,49 +671,24 @@ async def main():
             except Exception as e:
                 rel_id = f"{rel.get('start_node_id', '?')} -[{rel.get('type', '?')}]-> {rel.get('end_node_id', '?')}"
                 print(f"Error creating relationship {rel_id}: {e}")
-        
+
         # Create the final graph
         neo4j_graph = Neo4jGraph(nodes=neo4j_nodes, relationships=neo4j_relationships)
-        
+
         # Write to Neo4j
         print(f"Writing {len(neo4j_nodes)} nodes and {len(neo4j_relationships)} relationships to Neo4j...")
-        try:
-            result = await writer.run(neo4j_graph)
-            print(f"Successfully wrote to Neo4j: {result}")
-            
-            # Create a graph object with nodes and relationships
-            graph = {
-                'nodes': nodes,
-                'relationships': relationships
-            }
-            
-            print("\nWriting to Neo4j...")
-            try:
-                # Now run the writer with the graph
-                result = await writer.run(
-                    graph=graph,
-                    lexical_graph_config=LexicalGraphConfig()
-                )
-            except Exception as e:
-                print(f"\nERROR writing to Neo4j: {e}")
-                print(f"Error type: {type(e).__name__}")
-                import traceback
-                traceback.print_exc()
-                raise
-            print(f"Successfully wrote graph to Neo4j: {result.status}")
-            print(f"result: {result}")
-            
-        except Exception as e:
-            print(f"Error writing to Neo4j: {str(e)}")
-            raise
-        
+        writer_result = await writer.run(neo4j_graph)
+        print(f"Successfully wrote to Neo4j: {writer_result.status}")
+
     except Exception as e:
-        print(f"Error connecting to Neo4j: {str(e)}")
-        raise
+        print(f"An error occurred in main: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
-        # Close the driver when done (synchronously)
-        if 'driver' in locals():
+        # Close the driver when done
+        if driver:
             driver.close()
+            print("Neo4j driver closed.")
 
 if __name__ == "__main__":
     asyncio.run(main())
