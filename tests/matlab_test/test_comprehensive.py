@@ -24,7 +24,7 @@ from typing import Dict, List, Set, Tuple, Any
 
 from neo4j_graphrag.experimental.components.code_extractor.matlab.matlab_extractor import MatlabExtractor
 from neo4j_graphrag.experimental.components.schema import GraphSchema, NodeType, PropertyType, RelationshipType
-from neo4j_graphrag.experimental.components.types import TextChunk, TextChunks
+from neo4j_graphrag.experimental.components.types import TextChunk, TextChunks, DocumentInfo
 
 class MockLLM:
     """Mock LLM for testing."""
@@ -260,30 +260,118 @@ end
         """Test that all relationship patterns are correctly created."""
         print("\n=== TESTING RELATIONSHIP PATTERNS ===")
 
-        # Extract all files
+        # 创建提取器
+        extractor = MatlabExtractor(llm=self.mock_llm, debug=True)
+        
+        # 创建schema
+        schema = GraphSchema(
+            node_types=[
+                NodeType(
+                    label="Function",
+                    description="A code function definition",
+                    properties=[
+                        PropertyType(name="name", type="STRING", description="Name of the function"),
+                        PropertyType(name="file_path", type="STRING", description="Path to the file containing the function"),
+                        PropertyType(name="scope_id", type="STRING", description="ID of the scope where this function is defined"),
+                        PropertyType(name="scope_type", type="STRING", description="Type of scope: 'script' or 'function'"),
+                    ],
+                ),
+                NodeType(
+                    label="Variable",
+                    description="A variable used in the code",
+                    properties=[
+                        PropertyType(name="name", type="STRING", description="Name of the variable"),
+                        PropertyType(name="file_path", type="STRING", description="Path to the file where the variable is defined"),
+                        PropertyType(name="scope_id", type="STRING", description="ID of the scope where this variable is defined"),
+                        PropertyType(name="scope_type", type="STRING", description="Type of scope: 'script' or 'function'"),
+                    ],
+                ),
+                NodeType(
+                    label="Script",
+                    description="A code script file",
+                    properties=[
+                        PropertyType(name="name", type="STRING", description="Name of the script"),
+                        PropertyType(name="file_path", type="STRING", description="Path to the script file"),
+                    ],
+                ),
+            ],
+            relationship_types=[
+                RelationshipType(label="CALLS", description="A function or script calls another function or script"),
+                RelationshipType(label="USES", description="A function or script uses a variable"),
+                RelationshipType(label="DEFINES", description="A function or script defines a variable"),
+                RelationshipType(label="MODIFIES", description="A function or script modifies a variable"),
+                RelationshipType(label="ASSIGNED_TO", description="A variable is assigned to another variable"),
+            ],
+            patterns=[
+                ("Function", "CALLS", "Function"),
+                ("Function", "CALLS", "Script"),
+                ("Script", "CALLS", "Function"),
+                ("Script", "CALLS", "Script"),
+                ("Function", "USES", "Variable"),
+                ("Script", "USES", "Variable"),
+                ("Function", "DEFINES", "Variable"),
+                ("Script", "DEFINES", "Variable"),
+                ("Script", "DEFINES", "Function"),
+                ("Function", "MODIFIES", "Variable"),
+                ("Script", "MODIFIES", "Variable"),
+                ("Variable", "ASSIGNED_TO", "Variable"),
+            ]
+        )
+        
+        # 处理所有文件
         all_nodes = []
         all_relationships = []
-
+        
         for m_file in self.test_dir.glob("*.m"):
-            nodes, relationships = asyncio.run(self.extract_file(m_file))
-            all_nodes.extend(nodes)
-            all_relationships.extend(relationships)
-
-        # Remove duplicates
+            with open(m_file, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # 创建文本块
+            chunk = TextChunk(
+                text=content,
+                index=0,
+                metadata={"file_path": str(m_file), "file_name": m_file.name, "code_type": "matlab"}
+            )
+            
+            doc_info = DocumentInfo(
+                path=str(m_file),
+                metadata={"name": m_file.name}
+            )
+            
+            # 处理文件
+            result = asyncio.run(extractor.run(
+                chunks=TextChunks(chunks=[chunk]),
+                schema=schema,
+                document_info=doc_info,
+                enable_post_processing=False  # 先不启用后处理
+            ))
+            
+            # 收集节点和关系
+            all_nodes.extend(result.graph.nodes)
+            all_relationships.extend(result.graph.relationships)
+        
+        # 应用后处理
+        from neo4j_graphrag.experimental.components.types import Neo4jGraph
+        combined_graph = Neo4jGraph(nodes=all_nodes, relationships=all_relationships)
+        final_graph = MatlabExtractor.post_process_cross_file_relationships(combined_graph)
+        
+        # 转换为简单格式
         unique_nodes = []
-        seen_node_ids = set()
-        for node in all_nodes:
-            if node['id'] not in seen_node_ids:
-                unique_nodes.append(node)
-                seen_node_ids.add(node['id'])
-
+        for node in final_graph.nodes:
+            unique_nodes.append({
+                'id': node.id,
+                'label': node.label,
+                'properties': node.properties
+            })
+        
         unique_relationships = []
-        seen_rel_keys = set()
-        for rel in all_relationships:
-            key = (rel['start_node_id'], rel['end_node_id'], rel['type'])
-            if key not in seen_rel_keys:
-                unique_relationships.append(rel)
-                seen_rel_keys.add(key)
+        for rel in final_graph.relationships:
+            unique_relationships.append({
+                'start_node_id': rel.start_node_id,
+                'end_node_id': rel.end_node_id,
+                'type': rel.type,
+                'properties': rel.properties
+            })
 
         print(f"Total unique nodes: {len(unique_nodes)}")
         print(f"Total unique relationships: {len(unique_relationships)}")

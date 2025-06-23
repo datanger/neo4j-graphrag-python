@@ -216,5 +216,120 @@ def main():
         neo4j.close()
         print("\nConnection closed.")
 
+def query_cross_scope_relationships():
+    """查询Neo4j数据库中的跨作用域变量调用关系"""
+    
+    # 连接Neo4j数据库
+    driver = GraphDatabase.driver(
+        "bolt://localhost:7687",
+        auth=("neo4j", "password")
+    )
+    
+    try:
+        with driver.session(database="neo4j") as session:
+            
+            print("=== 查询跨作用域变量调用关系 ===\n")
+            
+            # 1. 查询所有跨作用域的USES关系
+            print("1. 跨作用域USES关系:")
+            result = session.run("""
+                MATCH (s)-[r:USES]->(v:Variable) 
+                WHERE s.scope_id <> v.scope_id 
+                RETURN s.name as source_name, s.scope_id as source_scope, 
+                       v.name as var_name, v.scope_id as var_scope, 
+                       r.usage_type as usage_type, r.post_processed as post_processed
+                LIMIT 10
+            """)
+            
+            for record in result:
+                print(f"  {record['source_name']} ({record['source_scope']}) -> {record['var_name']} ({record['var_scope']})")
+                print(f"    使用类型: {record['usage_type']}, 后处理: {record['post_processed']}")
+                print()
+            
+            # 2. 查询基于执行顺序的跨作用域关系
+            print("\n2. 基于执行顺序的跨作用域关系:")
+            result = session.run("""
+                MATCH (s)-[r:USES]->(v:Variable) 
+                WHERE r.usage_type = 'cross_scope_execution_order'
+                RETURN s.name as source_name, s.scope_id as source_scope, 
+                       v.name as var_name, v.scope_id as var_scope,
+                       r.source_script as source_script, r.target_script as target_script,
+                       r.execution_order as exec_order, r.source_execution_order as source_exec_order
+                LIMIT 10
+            """)
+            
+            for record in result:
+                print(f"  {record['source_name']} -> {record['var_name']}")
+                print(f"    源脚本: {record['source_script']}, 目标脚本: {record['target_script']}")
+                print(f"    执行顺序: {record['source_execution_order']} -> {record['exec_order']}")
+                print()
+            
+            # 3. 查询脚本间的CALLS关系
+            print("\n3. 脚本间CALLS关系:")
+            result = session.run("""
+                MATCH (s1:Script)-[r:CALLS]->(s2:Script)
+                RETURN s1.name as caller, s2.name as callee, 
+                       r.call_type as call_type, r.post_processed as post_processed
+                LIMIT 10
+            """)
+            
+            for record in result:
+                print(f"  {record['caller']} -> {record['callee']}")
+                print(f"    调用类型: {record['call_type']}, 后处理: {record['post_processed']}")
+                print()
+            
+            # 4. 查询函数间的CALLS关系
+            print("\n4. 函数间CALLS关系:")
+            result = session.run("""
+                MATCH (f1:Function)-[r:CALLS]->(f2:Function)
+                RETURN f1.name as caller, f2.name as callee, 
+                       r.call_type as call_type, r.post_processed as post_processed
+                LIMIT 10
+            """)
+            
+            for record in result:
+                print(f"  {record['caller']} -> {record['callee']}")
+                print(f"    调用类型: {record['call_type']}, 后处理: {record['post_processed']}")
+                print()
+            
+            # 5. 查询脚本调用函数的关系
+            print("\n5. 脚本调用函数的关系:")
+            result = session.run("""
+                MATCH (s:Script)-[r:CALLS]->(f:Function)
+                RETURN s.name as script, f.name as function, 
+                       r.call_type as call_type, r.post_processed as post_processed
+                LIMIT 10
+            """)
+            
+            for record in result:
+                print(f"  {record['script']} -> {record['function']}")
+                print(f"    调用类型: {record['call_type']}, 后处理: {record['post_processed']}")
+                print()
+            
+            # 6. 统计各种关系类型的数量
+            print("\n6. 关系类型统计:")
+            result = session.run("""
+                MATCH ()-[r]->()
+                RETURN type(r) as rel_type, count(r) as count
+                ORDER BY count DESC
+            """)
+            
+            for record in result:
+                print(f"  {record['rel_type']}: {record['count']}")
+            
+            # 7. 查询变量定义和使用统计
+            print("\n7. 变量定义和使用统计:")
+            result = session.run("""
+                MATCH (v:Variable)
+                RETURN v.scope_type as scope_type, count(v) as var_count
+                ORDER BY var_count DESC
+            """)
+            
+            for record in result:
+                print(f"  {record['scope_type']} 变量: {record['var_count']}")
+            
+    finally:
+        driver.close()
+
 if __name__ == "__main__":
-    main()
+    query_cross_scope_relationships()

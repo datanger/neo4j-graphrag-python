@@ -41,7 +41,7 @@ import asyncio
 import neo4j
 from neo4j_graphrag.llm.base import LLMInterface
 from neo4j_graphrag.experimental.components.code_extractor.matlab.matlab_extractor import (
-    MatlabExtractor, MatlabExtractionResult
+    MatlabExtractor, MatlabExtractionResult, _global_registry
 )
 from neo4j_graphrag.experimental.components.entity_relation_extractor import (
     LLMEntityRelationExtractor,
@@ -142,394 +142,7 @@ SCHEMA = GraphSchema(
     ],
 )
 
-EXAMPLES = """
-
-**关系模式说明：**
-
-1. **CALLS 关系**：
-   - `Script -> Function`: 脚本调用函数 (如 main_script.m 调用 helper_function)
-   - `Script -> Script`: 脚本调用其他脚本 (如 main_script.m 调用 helper_script.m)
-   - `Function -> Function`: 函数调用其他函数
-
-2. **DEFINES 关系**：
-   - `Script -> Variable`: 脚本定义变量 (如 main_script.m 定义 x, y, z)
-   - `Function -> Variable`: 函数定义参数或局部变量 (如 modify_variables 定义 in1, out1)
-   - `Script -> Function`: 脚本定义函数 (如脚本文件中定义的函数)
-
-3. **USES 关系**：
-   - `Script -> Variable`: 脚本使用外部变量 (如 main_script.m 使用 x, y)
-   - `Function -> Variable`: 函数使用外部变量 (如 modify_variables 使用 in1)
-
-4. **MODIFIES 关系**：
-   - `Script -> Variable`: 脚本修改变量 (如 main_script.m 修改 x, y)
-   - `Function -> Variable`: 函数修改变量
-
-5. **ASSIGNED_TO 关系**：
-   - `Variable -> Variable`: 变量赋值给其他变量 (如 x 赋值给 y, y 赋值给 z)
-
-**变量作用域处理说明：**
-
-**重要改进：每个脚本/函数中的变量都单独生成节点，即使变量名相同**
-
-1. **变量ID格式**：`var_{变量名}_{作用域ID}`
-   - 例如：`var_x_script_main_script` 表示 main_script.m 中的变量 x
-   - 例如：`var_x_func_modify_variables` 表示 modify_variables 函数中的变量 x
-
-2. **作用域隔离**：
-   - 不同脚本中的同名变量被视为不同的节点
-   - 不同函数中的同名变量被视为不同的节点
-   - 每个变量节点包含 `scope_id` 和 `scope_type` 属性
-
-3. **跨作用域关系**：
-   - **USES 关系**：当一个脚本/函数使用另一个作用域中定义的变量时
-   - **ASSIGNED_TO 关系**：当变量值从一个作用域传递到另一个作用域时
-
-**实际案例说明：**
-
-1. **同变量名在不同作用域**：
-   - `main_script.m` 中定义变量 `x` → 节点 `var_x_script_main_script`
-   - `modify_variables` 函数中也有变量 `x` → 节点 `var_x_func_modify_variables`
-   - 这两个变量是完全独立的节点
-
-2. **跨作用域变量使用**：
-   - `main_script.m` 调用 `modify_variables(x, y)` 时
-   - 创建关系：`script_main_script -[USES]-> var_x_script_main_script`
-   - 创建关系：`script_main_script -[USES]-> var_y_script_main_script`
-
-3. **变量赋值传递**：
-   - 在 `main_script.m` 中：`y = x + 5`
-   - 创建关系：`var_x_script_main_script -[ASSIGNED_TO]-> var_y_script_main_script`
-
-4. **函数调用和变量传递**：
-   - `main_script.m` 调用 `modify_variables(x, y)`
-   - 函数内部处理：`out1 = in1 * 2`
-   - 创建关系：`var_in1_func_modify_variables -[ASSIGNED_TO]-> var_out1_func_modify_variables`
-
-**优势：**
-- 避免变量名冲突
-- 清晰的作用域边界
-- 便于可视化展示
-- 支持复杂的跨文件变量依赖分析
-
-
-**输出格式：**
-```json
-{
-  "nodes": [
-    {
-      "type": "Script",
-      "id": "script_main_script",
-      "properties": {
-        "name": "main_script.m",
-        "file_path": "tests/matlab_test/examples/main_script.m",
-        "description": "Main script that demonstrates various relationship patterns"
-      }
-    },
-    {
-      "type": "Script",
-      "id": "script_helper_script",
-      "properties": {
-        "name": "helper_script.m",
-        "file_path": "tests/matlab_test/examples/helper_script.m",
-        "description": "Helper script called by main script"
-      }
-    },
-    {
-      "type": "Function",
-      "id": "func_helper_function",
-      "properties": {
-        "name": "helper_function",
-        "file_path": "tests/matlab_test/examples/main_script.m",
-        "parameters": "input_value",
-        "returns": "result",
-        "description": "Helper function that processes input"
-      }
-    },
-    {
-      "type": "Function",
-      "id": "func_modify_variables",
-      "properties": {
-        "name": "modify_variables",
-        "file_path": "tests/matlab_test/examples/modify_variables.m",
-        "parameters": "in1, in2",
-        "returns": "out1, out2",
-        "description": "Function that modifies its input variables"
-      }
-    },
-    {
-      "type": "Variable",
-      "id": "var_x_script_main_script",
-      "properties": {
-        "name": "x",
-        "file_path": "tests/matlab_test/examples/main_script.m",
-        "scope_id": "script_main_script",
-        "scope_type": "script",
-        "line_range": [["main script", 8, 8]]
-      }
-    },
-    {
-      "type": "Variable",
-      "id": "var_y_script_main_script",
-      "properties": {
-        "name": "y",
-        "file_path": "tests/matlab_test/examples/main_script.m",
-        "scope_id": "script_main_script",
-        "scope_type": "script",
-        "line_range": [["main script", 9, 9]]
-      }
-    },
-    {
-      "type": "Variable",
-      "id": "var_z_script_main_script",
-      "properties": {
-        "name": "z",
-        "file_path": "tests/matlab_test/examples/main_script.m",
-        "scope_id": "script_main_script",
-        "scope_type": "script",
-        "line_range": [["main script", 10, 10]]
-      }
-    },
-    {
-      "type": "Variable",
-      "id": "var_result1_script_main_script",
-      "properties": {
-        "name": "result1",
-        "file_path": "tests/matlab_test/examples/main_script.m",
-        "scope_id": "script_main_script",
-        "scope_type": "script",
-        "line_range": [["main script", 5, 5]]
-      }
-    },
-    {
-      "type": "Variable",
-      "id": "var_in1_func_modify_variables",
-      "properties": {
-        "name": "in1",
-        "file_path": "tests/matlab_test/examples/modify_variables.m",
-        "scope_id": "func_modify_variables",
-        "scope_type": "function",
-        "line_range": [["function modify_variables", 2, 2]]
-      }
-    },
-    {
-      "type": "Variable",
-      "id": "var_out1_func_modify_variables",
-      "properties": {
-        "name": "out1",
-        "file_path": "tests/matlab_test/examples/modify_variables.m",
-        "scope_id": "func_modify_variables",
-        "scope_type": "function",
-        "line_range": [["function modify_variables", 3, 3]]
-      }
-    },
-    {
-      "type": "Variable",
-      "id": "var_x_func_modify_variables",
-      "properties": {
-        "name": "x",
-        "file_path": "tests/matlab_test/examples/modify_variables.m",
-        "scope_id": "func_modify_variables",
-        "scope_type": "function",
-        "line_range": [["function modify_variables", 3, 3]]
-      }
-    },
-    {
-      "type": "Variable",
-      "id": "var_y_func_modify_variables",
-      "properties": {
-        "name": "y",
-        "file_path": "tests/matlab_test/examples/modify_variables.m",
-        "scope_id": "func_modify_variables",
-        "scope_type": "function",
-        "line_range": [["function modify_variables", 4, 4]]
-      }
-    }
-  ],
-  "relationships": [
-    {
-      "type": "CALLS",
-      "source_id": "script_main_script",
-      "source_type": "Script",
-      "target_id": "func_helper_function",
-      "target_type": "Function",
-      "properties": {
-        "call_type": "function_call",
-        "line_number": 5
-      }
-    },
-    {
-      "type": "CALLS",
-      "source_id": "script_main_script",
-      "source_type": "Script",
-      "target_id": "script_helper_script",
-      "target_type": "Script",
-      "properties": {
-        "call_type": "script_call",
-        "line_number": 8
-      }
-    },
-    {
-      "type": "CALLS",
-      "source_id": "script_main_script",
-      "source_type": "Script",
-      "target_id": "func_modify_variables",
-      "target_type": "Function",
-      "properties": {
-        "call_type": "function_call",
-        "line_number": 13
-      }
-    },
-    {
-      "type": "DEFINES",
-      "source_id": "script_main_script",
-      "source_type": "Script",
-      "target_id": "var_x_script_main_script",
-      "target_type": "Variable",
-      "properties": {
-        "type": "variable_definition",
-        "line_number": 8
-      }
-    },
-    {
-      "type": "DEFINES",
-      "source_id": "script_main_script",
-      "source_type": "Script",
-      "target_id": "var_y_script_main_script",
-      "target_type": "Variable",
-      "properties": {
-        "type": "variable_definition",
-        "line_number": 9
-      }
-    },
-    {
-      "type": "DEFINES",
-      "source_id": "script_main_script",
-      "source_type": "Script",
-      "target_id": "var_z_script_main_script",
-      "target_type": "Variable",
-      "properties": {
-        "type": "variable_definition",
-        "line_number": 10
-      }
-    },
-    {
-      "type": "DEFINES",
-      "source_id": "script_main_script",
-      "source_type": "Script",
-      "target_id": "var_result1_script_main_script",
-      "target_type": "Variable",
-      "properties": {
-        "type": "variable_definition",
-        "line_number": 5
-      }
-    },
-    {
-      "type": "DEFINES",
-      "source_id": "func_modify_variables",
-      "source_type": "Function",
-      "target_id": "var_in1_func_modify_variables",
-      "target_type": "Variable",
-      "properties": {
-        "type": "parameter",
-        "line_number": 2
-      }
-    },
-    {
-      "type": "DEFINES",
-      "source_id": "func_modify_variables",
-      "source_type": "Function",
-      "target_id": "var_out1_func_modify_variables",
-      "target_type": "Variable",
-      "properties": {
-        "type": "local",
-        "line_number": 3
-      }
-    },
-    {
-      "type": "USES",
-      "source_id": "script_main_script",
-      "source_type": "Script",
-      "target_id": "var_x_script_main_script",
-      "target_type": "Variable",
-      "properties": {
-        "usage_type": "external_variable",
-        "variable_name": "x",
-        "line_number": 9
-      }
-    },
-    {
-      "type": "USES",
-      "source_id": "script_main_script",
-      "source_type": "Script",
-      "target_id": "var_y_script_main_script",
-      "target_type": "Variable",
-      "properties": {
-        "usage_type": "external_variable",
-        "variable_name": "y",
-        "line_number": 10
-      }
-    },
-    {
-      "type": "USES",
-      "source_id": "func_modify_variables",
-      "source_type": "Function",
-      "target_id": "var_in1_func_modify_variables",
-      "target_type": "Variable",
-      "properties": {
-        "usage_type": "external_variable",
-        "variable_name": "in1",
-        "line_number": 3
-      }
-    },
-    {
-      "type": "MODIFIES",
-      "source_id": "script_main_script",
-      "source_type": "Script",
-      "target_id": "var_x_script_main_script",
-      "target_type": "Variable",
-      "properties": {
-        "type": "variable_modification",
-        "line_number": 13
-      }
-    },
-    {
-      "type": "MODIFIES",
-      "source_id": "script_main_script",
-      "source_type": "Script",
-      "target_id": "var_y_script_main_script",
-      "target_type": "Variable",
-      "properties": {
-        "type": "variable_modification",
-        "line_number": 13
-      }
-    },
-    {
-      "type": "ASSIGNED_TO",
-      "source_id": "var_x_script_main_script",
-      "source_type": "Variable",
-      "target_id": "var_y_script_main_script",
-      "target_type": "Variable",
-      "properties": {
-        "type": "variable_assignment",
-        "line_number": 9
-      }
-    },
-    {
-      "type": "ASSIGNED_TO",
-      "source_id": "var_y_script_main_script",
-      "source_type": "Variable",
-      "target_id": "var_z_script_main_script",
-      "target_type": "Variable",
-      "properties": {
-        "type": "variable_assignment",
-        "line_number": 10
-      }
-    }
-  ]
-}
-```
-
-"""
+EXAMPLES = open("neo4j_graphrag/experimental/components/code_extractor/matlab/examples.md").read()
 
 
 class Neo4jGraphResult(DataModel):
@@ -558,7 +171,7 @@ LOCAL_DATETIME, LOCAL_TIME, POINT, STRING, ZONED_DATETIME, ZONED_TIME.
 Return a valid JSON object that follows this precise structure:
 {schema}
 
-Return Examples:
+Examples:
 {examples}
 
 Please return a JSON object according to the above instructions based on the following file path and input text.
@@ -756,11 +369,11 @@ def ensure_neo4j_compatible(value, path=''):
         print(f"Converting unsupported type {type(value).__name__} to string at {path}")
         return str(value)
 
-async def process_matlab_files(directory: str, llm: LLMInterface) -> 'MatlabExtractionResult':
+async def process_matlab_files(directory: str, llm: LLMInterface, entry_script_path: str = None) -> 'MatlabExtractionResult':
     """Process MATLAB files in the given directory using the MatlabExtractor."""
-    # Initialize the extractor with the LLM
+    # Initialize the extractor with the LLM and entry script
     # extractor = LLMEntityRelationExtractor(llm=llm, prompt_template=CodeExtractionTemplate())
-    extractor = MatlabExtractor(llm=llm)
+    extractor = MatlabExtractor(llm=llm, entry_script_path=entry_script_path)
 
     # Find all .m files in the directory
     matlab_files = list(Path(directory).rglob("*.m"))
@@ -855,18 +468,83 @@ async def process_matlab_files(directory: str, llm: LLMInterface) -> 'MatlabExtr
 
     return result
 
+async def process_matlab_files_post_processing_only(directory: str, llm: LLMInterface, entry_script_path: str = None) -> 'MatlabExtractionResult':
+    """Process MATLAB files with post-processing only, using existing data.
+    
+    This function is used when we want to update only the post-processing
+    without rebuilding all the data from scratch.
+    
+    Args:
+        directory: Directory containing MATLAB files
+        llm: Language model interface
+        entry_script_path: Path to entry script for execution flow analysis
+        
+    Returns:
+        MatlabExtractionResult: The result containing the extracted graph
+    """
+    # Initialize the extractor with the LLM and entry script
+    extractor = MatlabExtractor(llm=llm, entry_script_path=entry_script_path)
+    
+    # Create a dummy chunk to trigger post-processing
+    dummy_chunk = TextChunk(
+        text="",
+        index=0,
+        metadata={"file_path": "dummy", "file_name": "dummy.m", "code_type": "matlab"}
+    )
+    
+    # Create dummy document info
+    doc_info = DocumentInfo(
+        path="dummy",
+        metadata={"name": "dummy"}
+    )
+    
+    # Run with rebuild_data=False to use existing data
+    result = await extractor.run(
+        chunks=TextChunks(chunks=[dummy_chunk]),
+        schema=SCHEMA,
+        document_info=doc_info,
+        lexical_graph_config=LexicalGraphConfig(),
+        examples=EXAMPLES,
+        enable_post_processing=True,
+        rebuild_data=False,
+    )
+    
+    return result
+
 async def main():
+    # 解析命令行参数
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='MATLAB Code Knowledge Graph Builder')
+    parser.add_argument('--matlab_dir', type=str, default="tests/matlab_test/examples",
+                       help='Directory containing MATLAB files')
+    parser.add_argument('--entry_script', type=str, default=None,
+                       help='Path to the entry script for execution flow analysis')
+    parser.add_argument('--rebuild_data', action='store_true',
+                       help='Rebuild all data instead of using existing data')
+    parser.add_argument('--neo4j_uri', type=str, default="bolt://localhost:7687",
+                       help='Neo4j connection URI')
+    parser.add_argument('--neo4j_user', type=str, default="neo4j",
+                       help='Neo4j username')
+    parser.add_argument('--neo4j_password', type=str, default="password",
+                       help='Neo4j password')
+    parser.add_argument('--neo4j_db', type=str, default="neo4j",
+                       help='Neo4j database name')
+    
+    args = parser.parse_args()
+    
     # Initialize LLM
     llm = MockLLM()
 
     # Directory containing MATLAB files
-    matlab_dir = "D:\\Work\\transformer-models"
+    matlab_dir = args.matlab_dir
+    entry_script_path = args.entry_script
 
     # Neo4j connection settings
-    NEO4J_URI = "bolt://localhost:7687"
-    NEO4J_USER = "neo4j"
-    NEO4J_PASSWORD = "password"
-    NEO4J_DB = "neo4j"
+    NEO4J_URI = args.neo4j_uri
+    NEO4J_USER = args.neo4j_user
+    NEO4J_PASSWORD = args.neo4j_password
+    NEO4J_DB = args.neo4j_db
 
     driver = None  # Initialize driver to None
     try:
@@ -882,8 +560,30 @@ async def main():
             session.run("MATCH (n) DETACH DELETE n")
         print("Database cleared successfully.")
 
+        # 检查是否需要重新构建数据
+        rebuild_data = args.rebuild_data
+        
+        # 检查是否存在已构建的数据
+        existing_data = len(_global_registry.all_nodes) > 0
+        
+        if not existing_data:
+            print("No existing data found, building from scratch...")
+            rebuild_data = True
+        elif rebuild_data:
+            print("Rebuild flag set, rebuilding all data...")
+            # 清除现有数据
+            _global_registry.reset_global_registry()
+        else:
+            print("Using existing data, only updating post-processing...")
+
         # Process MATLAB files and get the extraction result
-        result = await process_matlab_files(matlab_dir, llm)
+        if rebuild_data:
+            # 重新构建所有数据
+            result = await process_matlab_files(matlab_dir, llm, entry_script_path)
+        else:
+            # 只更新后处理
+            result = await process_matlab_files_post_processing_only(matlab_dir, llm, entry_script_path)
+            
         graph = result.graph  # Access the Neo4jGraph from the result
         print(f"Extracted graph with {len(graph.nodes)} nodes and {len(graph.relationships)} relationships")
 
