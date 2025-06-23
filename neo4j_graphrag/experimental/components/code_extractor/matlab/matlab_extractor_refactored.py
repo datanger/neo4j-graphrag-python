@@ -1,4 +1,4 @@
- # Copyright (c) "Neo4j"
+# Copyright (c) "Neo4j"
 # Neo4j Sweden AB [https://neo4j.com]
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -64,7 +64,6 @@ class MatlabExtractor(LLMEntityRelationExtractor):
         on_error: OnError = OnError.IGNORE,
         create_lexical_graph: bool = True,
         max_concurrency: int = 5,
-        debug: bool = False,
         enable_post_processing: bool = True,
         entry_script_path: Optional[str] = None,
         use_llm: bool = False,
@@ -74,7 +73,6 @@ class MatlabExtractor(LLMEntityRelationExtractor):
             on_error=on_error,
             create_lexical_graph=create_lexical_graph,
             max_concurrency=max_concurrency,
-            debug=debug,
         )
         
         self.enable_post_processing = enable_post_processing
@@ -98,38 +96,67 @@ class MatlabExtractor(LLMEntityRelationExtractor):
 
     def _node_exists(self, node_id: str) -> bool:
         """检查节点是否已存在"""
-        return any(node['id'] == node_id for node in self.nodes)
+        return any(node.id == node_id for node in self.nodes)
 
     def _add_node_if_not_exists(self, node_data: dict) -> None:
         """添加节点（如果不存在）"""
         if not self._node_exists(node_data['id']):
+            # 转换节点数据为Neo4jNode格式
+            label = node_data.get('labels', ['Unknown'])[0] if 'labels' in node_data else node_data.get('label', 'Unknown')
+            properties = node_data.get('properties', {})
+            
             # 确保属性兼容Neo4j
-            if 'properties' in node_data:
-                node_data['properties'] = {
-                    k: ensure_neo4j_compatible(v) 
-                    for k, v in node_data['properties'].items()
-                }
-            self.nodes.append(node_data)
+            properties = {
+                k: ensure_neo4j_compatible(v) 
+                for k, v in properties.items()
+            }
+            
+            neo4j_node = Neo4jNode(
+                id=node_data['id'],
+                label=label,
+                properties=properties
+            )
+            self.nodes.append(neo4j_node)
 
     def _add_edge(self, source_id: str, target_id: str, label: str, properties: dict = None, line_number: int = None) -> None:
         """添加边"""
-        edge_data = {
-            'source': source_id,
-            'target': target_id,
-            'type': label,
-            'properties': properties or {}
-        }
+        if properties is None:
+            properties = {}
         
         if line_number:
-            edge_data['properties']['line_number'] = line_number
+            properties['line_number'] = line_number
         
         # 确保属性兼容Neo4j
-        edge_data['properties'] = {
+        properties = {
             k: ensure_neo4j_compatible(v) 
-            for k, v in edge_data['properties'].items()
+            for k, v in properties.items()
         }
         
-        self.relationships.append(edge_data)
+        # 确定节点类型
+        start_node_type = self._get_node_type(source_id)
+        end_node_type = self._get_node_type(target_id)
+        
+        neo4j_relationship = Neo4jRelationship(
+            start_node_id=source_id,
+            end_node_id=target_id,
+            type=label,
+            start_node_type=start_node_type,
+            end_node_type=end_node_type,
+            properties=properties
+        )
+        
+        self.relationships.append(neo4j_relationship)
+
+    def _get_node_type(self, node_id: str) -> str:
+        """根据节点ID确定节点类型"""
+        if node_id.startswith('script_'):
+            return 'Script'
+        elif node_id.startswith('func_') or node_id.startswith('function_'):
+            return 'Function'
+        elif node_id.startswith('var_') or node_id.startswith('variable_use_'):
+            return 'Variable'
+        else:
+            return 'Unknown'
 
     async def extract_for_chunk(
         self, schema: GraphSchema, examples: str, chunk: TextChunk
@@ -192,50 +219,48 @@ class MatlabExtractor(LLMEntityRelationExtractor):
             return
         
         for node in self.nodes:
-            if 'description' not in node.get('properties', {}):
+            if 'description' not in node.properties:
                 code_snippet = get_code_snippet(node)
                 try:
                     description = await self._generate_node_description(node, code_snippet)
-                    node['properties']['description'] = description
+                    node.properties['description'] = description
                 except Exception as e:
-                    logger.warning(f"Failed to generate description for node {node['id']}: {e}")
+                    logger.warning(f"Failed to generate description for node {node.id}: {e}")
 
-    async def _generate_node_description(self, node: Dict[str, Any], code_snippet: str) -> str:
-        """生成单个节点的描述"""
-        if not self.llm:
-            return ""
-        
-        node_type = node['labels'][0] if node['labels'] else 'Unknown'
-        node_name = node.get('properties', {}).get('name', 'Unknown')
-        
+    async def _generate_node_description(self, node: Neo4jNode, code_snippet: str) -> str:
+        """为节点生成描述"""
         prompt = f"""
-        Please provide a brief description for this MATLAB {node_type.lower()} named '{node_name}'.
+        Generate a brief description for this MATLAB code element:
         
-        Code snippet:
-        {code_snippet[:300]}...
+        Type: {node.label}
+        Name: {node.properties.get('name', 'Unknown')}
+        Code: {code_snippet[:200]}...
         
-        Description:"""
+        Description:
+        """
         
         try:
-            response = await self.llm.generate(prompt)
-            return response.strip()
+            response = await self.llm.ainvoke(prompt)
+            return response.content.strip()
         except Exception as e:
             logger.error(f"Error generating description: {e}")
-            return f"MATLAB {node_type.lower()}: {node_name}"
+            return "Auto-generated description"
 
     def _post_process(self) -> None:
-        """后处理"""
-        # 清理重复项
-        self.post_processor.cleanup_duplicates(Neo4jGraph(nodes=self.nodes, relationships=self.relationships))
-        
-        # 提取变量和关系
-        self.post_processor.extract_variables_and_relationships(Neo4jGraph(nodes=self.nodes, relationships=self.relationships))
-        
-        # 建立跨作用域关系
-        self.post_processor.establish_cross_scope_relationships(Neo4jGraph(nodes=self.nodes, relationships=self.relationships))
-        
-        # 建立脚本到脚本调用
-        self.post_processor.establish_script_to_script_calls(Neo4jGraph(nodes=self.nodes, relationships=self.relationships))
+        """后处理：处理跨文件关系和变量作用域"""
+        try:
+            # 创建临时图进行后处理
+            temp_graph = Neo4jGraph(nodes=self.nodes, relationships=self.relationships)
+            
+            # 应用后处理
+            processed_graph = self.post_processor.post_process_cross_file_relationships(temp_graph)
+            
+            # 更新状态
+            self.nodes = processed_graph.nodes
+            self.relationships = processed_graph.relationships
+            
+        except Exception as e:
+            logger.error(f"Error in post-processing: {e}")
 
     def _reset_state(self) -> None:
         """重置状态"""
@@ -255,55 +280,71 @@ class MatlabExtractor(LLMEntityRelationExtractor):
         rebuild_data: bool = False,
         **kwargs: Any,
     ) -> MatlabExtractionResult:
-        """运行MATLAB代码提取"""
-        # 重置全局注册表（如果需要）
-        if rebuild_data:
-            reset_global_registry()
-            self.registry = get_global_registry()
-            if self.entry_script_path:
-                self.registry.set_entry_script(self.entry_script_path)
-        
-        # 设置后处理选项
+        """运行提取器"""
         if enable_post_processing is not None:
             self.enable_post_processing = enable_post_processing
         
-        # 执行提取
-        if self.use_llm and self.llm:
-            # 使用LLM进行提取
-            graph = await super().run(
-                chunks=chunks,
-                document_info=document_info,
-                lexical_graph_config=lexical_graph_config,
-                schema=schema,
-                examples=examples,
-                **kwargs
-            )
-        else:
-            # 使用纯Python实现
-            all_nodes = []
-            all_relationships = []
-            
-            # 处理每个代码块
-            for chunk in chunks:
-                try:
-                    chunk_graph = await self.extract_for_chunk(schema or GraphSchema(), examples, chunk)
-                    all_nodes.extend(chunk_graph.nodes)
-                    all_relationships.extend(chunk_graph.relationships)
-                except Exception as e:
-                    logger.error(f"Error processing chunk: {e}")
-                    if self.on_error == OnError.RAISE:
-                        raise
-            
-            # 后处理跨文件关系
-            if self.enable_post_processing:
-                temp_graph = Neo4jGraph(nodes=all_nodes, relationships=all_relationships)
-                processed_graph = self.post_processor.post_process_cross_file_relationships(temp_graph)
-                all_nodes = processed_graph.nodes
-                all_relationships = processed_graph.relationships
-            
-            graph = Neo4jGraph(nodes=all_nodes, relationships=all_relationships)
+        # 重置全局注册表
+        reset_global_registry()
         
-        return MatlabExtractionResult(graph=graph)
+        # 处理所有块
+        all_nodes = []
+        all_relationships = []
+        
+        for chunk in chunks.chunks:
+            try:
+                # 只进行解析，不进行后处理
+                result = await self.extract_for_chunk_without_post_processing(schema or GraphSchema(), examples, chunk)
+                all_nodes.extend(result.nodes)
+                all_relationships.extend(result.relationships)
+            except Exception as e:
+                logger.error(f"Error processing chunk: {e}")
+                if self.on_error == OnError.RAISE:
+                    raise
+        
+        # 创建临时图进行后处理
+        temp_graph = Neo4jGraph(nodes=all_nodes, relationships=all_relationships)
+        
+        # 应用后处理（只调用一次）
+        if self.enable_post_processing:
+            processed_graph = self.post_processor.post_process_cross_file_relationships(temp_graph)
+            all_nodes = processed_graph.nodes
+            all_relationships = processed_graph.relationships
+        
+        # 创建最终图
+        final_graph = Neo4jGraph(nodes=all_nodes, relationships=all_relationships)
+        
+        return MatlabExtractionResult(graph=final_graph)
+
+    async def extract_for_chunk_without_post_processing(
+        self, schema: GraphSchema, examples: str, chunk: TextChunk
+    ) -> Neo4jGraph:
+        """为单个代码块执行提取（不进行后处理）"""
+        try:
+            # 重置状态
+            self._reset_state()
+            
+            # 解析MATLAB代码
+            self._parse_matlab_code(chunk)
+            
+            # 生成描述（如果需要）
+            if self.use_llm and self.llm:
+                await self._generate_descriptions()
+            
+            # 不进行后处理
+            # if self.enable_post_processing:
+            #     self._post_process()
+            
+            # 构建Neo4j图
+            graph = Neo4jGraph(nodes=self.nodes, relationships=self.relationships)
+            
+            return graph
+            
+        except Exception as e:
+            logger.error(f"Error extracting from chunk: {e}")
+            if self.on_error == OnError.RAISE:
+                raise
+            return Neo4jGraph(nodes=[], relationships=[])
 
     @classmethod
     def reset_global_registry(cls):

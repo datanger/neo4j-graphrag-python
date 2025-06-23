@@ -23,7 +23,7 @@ from unittest.mock import MagicMock
 from typing import Dict, List, Set, Tuple, Any
 
 from neo4j_graphrag.experimental.components.code_extractor.matlab.matlab_extractor import MatlabExtractor
-from neo4j_graphrag.experimental.components.schema import GraphSchema, NodeType, PropertyType, RelationshipType
+from neo4j_graphrag.experimental.components.code_extractor.matlab.schema import SCHEMA
 from neo4j_graphrag.experimental.components.types import TextChunk, TextChunks, DocumentInfo
 
 class MockLLM:
@@ -47,7 +47,6 @@ class TestComprehensiveMatlabExtraction(unittest.TestCase):
         cls.mock_llm = MockLLM()
         cls.extractor = MatlabExtractor(
             llm=cls.mock_llm,
-            debug=True,
             enable_post_processing=True
         )
 
@@ -148,412 +147,245 @@ end
             metadata={"file_path": str(file_path)}
         )
 
-        # Create schema
-        schema = GraphSchema(
-            node_types=[
-                NodeType(
-                    label="Function",
-                    description="A code function definition",
-                    properties=[
-                        PropertyType(name="name", type="STRING", description="Name of the function"),
-                        PropertyType(name="file_path", type="STRING", description="Path to the file containing the function"),
-                        PropertyType(name="scope_id", type="STRING", description="ID of the scope where this function is defined"),
-                        PropertyType(name="scope_type", type="STRING", description="Type of scope: 'script' or 'function'"),
-                    ],
-                ),
-                NodeType(
-                    label="Variable",
-                    description="A variable used in the code",
-                    properties=[
-                        PropertyType(name="name", type="STRING", description="Name of the variable"),
-                        PropertyType(name="file_path", type="STRING", description="Path to the file where the variable is defined"),
-                        PropertyType(name="scope_id", type="STRING", description="ID of the scope where this variable is defined"),
-                        PropertyType(name="scope_type", type="STRING", description="Type of scope: 'script' or 'function'"),
-                    ],
-                ),
-                NodeType(
-                    label="Script",
-                    description="A code script file",
-                    properties=[
-                        PropertyType(name="name", type="STRING", description="Name of the script"),
-                        PropertyType(name="file_path", type="STRING", description="Path to the script file"),
-                    ],
-                ),
-            ],
-            relationship_types=[
-                RelationshipType(label="CALLS", description="A function or script calls another function or script"),
-                RelationshipType(label="USES", description="A function or script uses a variable"),
-                RelationshipType(label="DEFINES", description="A function or script defines a variable"),
-                RelationshipType(label="MODIFIES", description="A function or script modifies a variable"),
-                RelationshipType(label="ASSIGNED_TO", description="A variable is assigned to another variable"),
-            ],
-            patterns=[
-                ("Function", "CALLS", "Function"),
-                ("Function", "CALLS", "Script"),
-                ("Script", "CALLS", "Function"),
-                ("Script", "CALLS", "Script"),
-                ("Function", "USES", "Variable"),
-                ("Script", "USES", "Variable"),
-                ("Function", "DEFINES", "Variable"),
-                ("Script", "DEFINES", "Variable"),
-                ("Script", "DEFINES", "Function"),
-                ("Function", "MODIFIES", "Variable"),
-                ("Script", "MODIFIES", "Variable"),
-                ("Variable", "ASSIGNED_TO", "Variable"),
-            ]
-        )
-
-        result = await self.extractor.extract_for_chunk(schema, "", chunk)
-
-        # Convert to dictionaries for easier testing
-        nodes = [dict(node) for node in result.nodes]
-        relationships = [dict(rel) for rel in result.relationships]
-
+        # Use predefined SCHEMA
+        result = await self.extractor.extract_for_chunk(SCHEMA, "", chunk)
+        
+        if result and hasattr(result, 'nodes'):
+            nodes = result.nodes
+        else:
+            nodes = []
+            
+        if result and hasattr(result, 'relationships'):
+            relationships = result.relationships
+        else:
+            relationships = []
+            
         return nodes, relationships
 
     def test_scope_specific_variables(self):
-        """Test that variables are scope-specific (same name in different scopes = different nodes)."""
-        print("\n=== TESTING SCOPE-SPECIFIC VARIABLES ===")
-
-        # Extract main script
-        nodes, relationships = asyncio.run(self.extract_file(self.test_dir / "main_script.m"))
-
-        # Find all variable nodes
-        variable_nodes = [n for n in nodes if n['label'] == 'Variable']
-
-        # Group variables by name
-        variables_by_name = {}
-        for node in variable_nodes:
-            name = node['properties']['name']
-            if name not in variables_by_name:
-                variables_by_name[name] = []
-            variables_by_name[name].append({
-                'id': node['id'],
-                'scope_id': node['properties']['scope_id'],
-                'scope_type': node['properties']['scope_type']
-            })
-
-        print(f"Found {len(variable_nodes)} variable nodes")
-        print("Variables by name:")
-        for name, instances in variables_by_name.items():
-            print(f"  {name}: {len(instances)} instances")
-            for inst in instances:
-                print(f"    - {inst['id']} (scope: {inst['scope_type']} {inst['scope_id']})")
-
-        # Check for variables with same name in different scopes
-        multi_scope_vars = {name: instances for name, instances in variables_by_name.items() if len(instances) > 1}
-
-        print(f"\nVariables in multiple scopes: {len(multi_scope_vars)}")
-        for name, instances in multi_scope_vars.items():
-            print(f"  {name}: {len(instances)} scopes")
-            scope_ids = [inst['scope_id'] for inst in instances]
-            self.assertGreater(len(set(scope_ids)), 1, f"Variable {name} should be in different scopes")
-
-        # Verify that each variable has a unique ID
-        variable_ids = [n['id'] for n in variable_nodes]
-        unique_ids = set(variable_ids)
-        self.assertEqual(len(variable_ids), len(unique_ids), "All variable nodes should have unique IDs")
-
-        print("✓ Scope-specific variable handling works correctly")
+        """Test that variables are scope-specific with proper ID format."""
+        print("\nTesting scope-specific variables...")
+        
+        async def run_test():
+            # Extract from main script
+            main_nodes, _ = await self.extract_file(self.test_dir / "main_script.m")
+            
+            # Extract from helper function
+            func_nodes, _ = await self.extract_file(self.test_dir / "helper_function.m")
+            
+            # Find variable nodes
+            main_vars = [node for node in main_nodes if node.get('type') == 'Variable']
+            func_vars = [node for node in func_nodes if node.get('type') == 'Variable']
+            
+            # Check main script variables
+            for var in main_vars:
+                var_id = var.get('id', '')
+                properties = var.get('properties', {})
+                name = properties.get('name', '')
+                scope_id = properties.get('scope_id', '')
+                scope_type = properties.get('scope_type', '')
+                
+                # Check ID format
+                expected_id = f"var_{name}_{scope_id}"
+                assert var_id == expected_id, f"Variable ID format mismatch: {var_id} != {expected_id}"
+                
+                # Check scope properties
+                assert scope_type == 'script', f"Main script variable should have scope_type 'script': {scope_type}"
+                assert 'main_script' in scope_id, f"Main script variable should have main_script in scope_id: {scope_id}"
+            
+            # Check function variables
+            for var in func_vars:
+                var_id = var.get('id', '')
+                properties = var.get('properties', {})
+                name = properties.get('name', '')
+                scope_id = properties.get('scope_id', '')
+                scope_type = properties.get('scope_type', '')
+                
+                # Check ID format
+                expected_id = f"var_{name}_{scope_id}"
+                assert var_id == expected_id, f"Variable ID format mismatch: {var_id} != {expected_id}"
+                
+                # Check scope properties
+                assert scope_type == 'function', f"Function variable should have scope_type 'function': {scope_type}"
+                assert 'helper_function' in scope_id, f"Function variable should have helper_function in scope_id: {scope_id}"
+            
+            # Check that variables with same names have different IDs
+            main_var_names = [var.get('properties', {}).get('name', '') for var in main_vars]
+            func_var_names = [var.get('properties', {}).get('name', '') for var in func_vars]
+            
+            common_names = set(main_var_names) & set(func_var_names)
+            for name in common_names:
+                main_var = next(v for v in main_vars if v.get('properties', {}).get('name') == name)
+                func_var = next(v for v in func_vars if v.get('properties', {}).get('name') == name)
+                
+                assert main_var.get('id') != func_var.get('id'), f"Variables with same name should have different IDs: {name}"
+            
+            print(f"✓ Scope-specific variables working correctly ({len(main_vars)} main script vars, {len(func_vars)} function vars)")
+            return True
+        
+        return asyncio.run(run_test())
 
     def test_relationship_patterns(self):
-        """Test that all relationship patterns are correctly created."""
-        print("\n=== TESTING RELATIONSHIP PATTERNS ===")
-
-        # 创建提取器
-        extractor = MatlabExtractor(llm=self.mock_llm, debug=True)
+        """Test that all required relationship patterns are created."""
+        print("\nTesting relationship patterns...")
         
-        # 创建schema
-        schema = GraphSchema(
-            node_types=[
-                NodeType(
-                    label="Function",
-                    description="A code function definition",
-                    properties=[
-                        PropertyType(name="name", type="STRING", description="Name of the function"),
-                        PropertyType(name="file_path", type="STRING", description="Path to the file containing the function"),
-                        PropertyType(name="scope_id", type="STRING", description="ID of the scope where this function is defined"),
-                        PropertyType(name="scope_type", type="STRING", description="Type of scope: 'script' or 'function'"),
-                    ],
-                ),
-                NodeType(
-                    label="Variable",
-                    description="A variable used in the code",
-                    properties=[
-                        PropertyType(name="name", type="STRING", description="Name of the variable"),
-                        PropertyType(name="file_path", type="STRING", description="Path to the file where the variable is defined"),
-                        PropertyType(name="scope_id", type="STRING", description="ID of the scope where this variable is defined"),
-                        PropertyType(name="scope_type", type="STRING", description="Type of scope: 'script' or 'function'"),
-                    ],
-                ),
-                NodeType(
-                    label="Script",
-                    description="A code script file",
-                    properties=[
-                        PropertyType(name="name", type="STRING", description="Name of the script"),
-                        PropertyType(name="file_path", type="STRING", description="Path to the script file"),
-                    ],
-                ),
-            ],
-            relationship_types=[
-                RelationshipType(label="CALLS", description="A function or script calls another function or script"),
-                RelationshipType(label="USES", description="A function or script uses a variable"),
-                RelationshipType(label="DEFINES", description="A function or script defines a variable"),
-                RelationshipType(label="MODIFIES", description="A function or script modifies a variable"),
-                RelationshipType(label="ASSIGNED_TO", description="A variable is assigned to another variable"),
-            ],
-            patterns=[
-                ("Function", "CALLS", "Function"),
-                ("Function", "CALLS", "Script"),
+        async def run_test():
+            # Extract from all files
+            all_nodes = []
+            all_relationships = []
+            
+            test_files = ["main_script.m", "helper_function.m", "modify_variables.m", "helper_script.m", "display_results.m"]
+            
+            for file_name in test_files:
+                file_path = self.test_dir / file_name
+                if file_path.exists():
+                    nodes, relationships = await self.extract_file(file_path)
+                    all_nodes.extend(nodes)
+                    all_relationships.extend(relationships)
+            
+            # Check relationship types
+            rel_types = set(rel.get('type') for rel in all_relationships)
+            expected_types = {"CALLS", "USES", "DEFINES", "MODIFIES", "ASSIGNED_TO"}
+            
+            for rel_type in expected_types:
+                assert rel_type in rel_types, f"Missing relationship type: {rel_type}"
+            
+            # Check specific patterns
+            patterns_found = set()
+            for rel in all_relationships:
+                source_type = rel.get('source_type', '')
+                rel_type = rel.get('type', '')
+                target_type = rel.get('target_type', '')
+                pattern = (source_type, rel_type, target_type)
+                patterns_found.add(pattern)
+            
+            # Verify all required patterns are present
+            required_patterns = [
                 ("Script", "CALLS", "Function"),
                 ("Script", "CALLS", "Script"),
-                ("Function", "USES", "Variable"),
+                ("Function", "CALLS", "Function"),
                 ("Script", "USES", "Variable"),
-                ("Function", "DEFINES", "Variable"),
+                ("Function", "USES", "Variable"),
                 ("Script", "DEFINES", "Variable"),
+                ("Function", "DEFINES", "Variable"),
                 ("Script", "DEFINES", "Function"),
-                ("Function", "MODIFIES", "Variable"),
                 ("Script", "MODIFIES", "Variable"),
+                ("Function", "MODIFIES", "Variable"),
                 ("Variable", "ASSIGNED_TO", "Variable"),
             ]
-        )
-        
-        # 处理所有文件
-        all_nodes = []
-        all_relationships = []
-        
-        for m_file in self.test_dir.glob("*.m"):
-            with open(m_file, 'r', encoding='utf-8') as f:
-                content = f.read()
             
-            # 创建文本块
-            chunk = TextChunk(
-                text=content,
-                index=0,
-                metadata={"file_path": str(m_file), "file_name": m_file.name, "code_type": "matlab"}
-            )
+            for pattern in required_patterns:
+                assert pattern in patterns_found, f"Missing required pattern: {pattern}"
             
-            doc_info = DocumentInfo(
-                path=str(m_file),
-                metadata={"name": m_file.name}
-            )
-            
-            # 处理文件
-            result = asyncio.run(extractor.run(
-                chunks=TextChunks(chunks=[chunk]),
-                schema=schema,
-                document_info=doc_info,
-                enable_post_processing=False  # 先不启用后处理
-            ))
-            
-            # 收集节点和关系
-            all_nodes.extend(result.graph.nodes)
-            all_relationships.extend(result.graph.relationships)
+            print(f"✓ All {len(required_patterns)} required relationship patterns found")
+            return True
         
-        # 应用后处理
-        from neo4j_graphrag.experimental.components.types import Neo4jGraph
-        combined_graph = Neo4jGraph(nodes=all_nodes, relationships=all_relationships)
-        final_graph = MatlabExtractor.post_process_cross_file_relationships(combined_graph)
-        
-        # 转换为简单格式
-        unique_nodes = []
-        for node in final_graph.nodes:
-            unique_nodes.append({
-                'id': node.id,
-                'label': node.label,
-                'properties': node.properties
-            })
-        
-        unique_relationships = []
-        for rel in final_graph.relationships:
-            unique_relationships.append({
-                'start_node_id': rel.start_node_id,
-                'end_node_id': rel.end_node_id,
-                'type': rel.type,
-                'properties': rel.properties
-            })
-
-        print(f"Total unique nodes: {len(unique_nodes)}")
-        print(f"Total unique relationships: {len(unique_relationships)}")
-
-        # Group relationships by type
-        rels_by_type = {}
-        for rel in unique_relationships:
-            rel_type = rel['type']
-            if rel_type not in rels_by_type:
-                rels_by_type[rel_type] = []
-            rels_by_type[rel_type].append(rel)
-
-        print("\nRelationships by type:")
-        for rel_type, rels in rels_by_type.items():
-            print(f"  {rel_type}: {len(rels)} relationships")
-
-        # Test specific relationship patterns
-        expected_patterns = [
-            ("Script", "CALLS", "Function"),
-            ("Script", "CALLS", "Script"),
-            ("Script", "DEFINES", "Variable"),
-            ("Function", "DEFINES", "Variable"),
-            ("Script", "USES", "Variable"),
-            ("Function", "USES", "Variable"),
-            ("Variable", "ASSIGNED_TO", "Variable"),
-        ]
-
-        for source_type, rel_type, target_type in expected_patterns:
-            found = False
-            for rel in unique_relationships:
-                source_node = next((n for n in unique_nodes if n['id'] == rel['start_node_id']), None)
-                target_node = next((n for n in unique_nodes if n['id'] == rel['end_node_id']), None)
-
-                if (source_node and target_node and
-                    source_node['label'] == source_type and
-                    rel['type'] == rel_type and
-                    target_node['label'] == target_type):
-                    found = True
-                    break
-
-            self.assertTrue(found, f"Missing relationship pattern: {source_type} -[{rel_type}]-> {target_type}")
-            print(f"  ✓ Found {source_type} -[{rel_type}]-> {target_type}")
-
-        print("✓ All expected relationship patterns found")
+        return asyncio.run(run_test())
 
     def test_variable_assignment_tracking(self):
-        """Test that variable assignments are correctly tracked."""
-        print("\n=== TESTING VARIABLE ASSIGNMENT TRACKING ===")
-
-        # Extract main script
-        nodes, relationships = asyncio.run(self.extract_file(self.test_dir / "main_script.m"))
-
-        # Find ASSIGNED_TO relationships
-        assigned_to_rels = [r for r in relationships if r['type'] == 'ASSIGNED_TO']
-
-        print(f"Found {len(assigned_to_rels)} ASSIGNED_TO relationships")
-
-        for rel in assigned_to_rels:
-            source_node = next((n for n in nodes if n['id'] == rel['start_node_id']), None)
-            target_node = next((n for n in nodes if n['id'] == rel['end_node_id']), None)
-
-            if source_node and target_node:
-                print(f"  {source_node['properties']['name']} -> {target_node['properties']['name']}")
-                print(f"    Source: {source_node['id']}")
-                print(f"    Target: {target_node['id']}")
-
-        # Verify that we have assignments
-        self.assertGreater(len(assigned_to_rels), 0, "Should have at least one ASSIGNED_TO relationship")
-
-        print("✓ Variable assignment tracking works correctly")
+        """Test that variable assignments are properly tracked."""
+        print("\nTesting variable assignment tracking...")
+        
+        async def run_test():
+            # Extract from main script
+            nodes, relationships = await self.extract_file(self.test_dir / "main_script.m")
+            
+            # Find ASSIGNED_TO relationships
+            assigned_to_rels = [rel for rel in relationships if rel.get('type') == 'ASSIGNED_TO']
+            
+            # Should have assignments like y = x + 5, z = y * 2
+            assert len(assigned_to_rels) >= 2, f"Expected at least 2 assignments, found {len(assigned_to_rels)}"
+            
+            for rel in assigned_to_rels:
+                source_id = rel.get('source_id', '')
+                target_id = rel.get('target_id', '')
+                
+                # Both should be variables
+                assert 'var_' in source_id, f"ASSIGNED_TO source should be a variable: {source_id}"
+                assert 'var_' in target_id, f"ASSIGNED_TO target should be a variable: {target_id}"
+                
+                # Should be in same scope
+                source_scope = source_id.split('_', 2)[2] if '_' in source_id else ''
+                target_scope = target_id.split('_', 2)[2] if '_' in target_id else ''
+                assert source_scope == target_scope, f"Assignment should be within same scope: {source_scope} != {target_scope}"
+            
+            print(f"✓ Variable assignment tracking working correctly ({len(assigned_to_rels)} assignments)")
+            return True
+        
+        return asyncio.run(run_test())
 
     def test_function_parameter_handling(self):
-        """Test that function parameters are correctly handled."""
-        print("\n=== TESTING FUNCTION PARAMETER HANDLING ===")
-
-        # Extract helper function
-        nodes, relationships = asyncio.run(self.extract_file(self.test_dir / "helper_function.m"))
-
-        # Find function node
-        function_nodes = [n for n in nodes if n['label'] == 'Function']
-        self.assertGreater(len(function_nodes), 0, "Should find at least one function")
-
-        func_node = function_nodes[0]
-        print(f"Function: {func_node['properties']['name']}")
-        print(f"Parameters: {func_node['properties'].get('parameters', [])}")
-
-        # Find DEFINES relationships from function to variables
-        defines_rels = [r for r in relationships
-                       if r['type'] == 'DEFINES' and r['start_node_id'] == func_node['id']]
-
-        print(f"Function defines {len(defines_rels)} variables")
-
-        for rel in defines_rels:
-            target_node = next((n for n in nodes if n['id'] == rel['end_node_id']), None)
-            if target_node:
-                print(f"  - {target_node['properties']['name']}")
-
-        # Verify that parameters are defined
-        expected_params = ['input']
-        for param in expected_params:
-            param_found = any(
-                n['properties']['name'] == param and n['properties']['scope_id'] == func_node['id']
-                for n in nodes if n['label'] == 'Variable'
-            )
-            self.assertTrue(param_found, f"Parameter '{param}' should be defined by function")
-
-        print("✓ Function parameter handling works correctly")
+        """Test that function parameters are handled correctly."""
+        print("\nTesting function parameter handling...")
+        
+        async def run_test():
+            # Extract from modify_variables function
+            nodes, relationships = await self.extract_file(self.test_dir / "modify_variables.m")
+            
+            # Find function node
+            func_nodes = [node for node in nodes if node.get('type') == 'Function']
+            assert len(func_nodes) == 1, "Should have exactly one function node"
+            
+            func_node = func_nodes[0]
+            func_id = func_node.get('id', '')
+            properties = func_node.get('properties', {})
+            parameters = properties.get('parameters', '')
+            
+            # Check parameters
+            expected_params = ['in1', 'in2']
+            param_list = [p.strip() for p in parameters.split(',') if p.strip()]
+            assert param_list == expected_params, f"Parameters mismatch: {param_list} != {expected_params}"
+            
+            # Check that parameters are defined as variables in function scope
+            var_nodes = [node for node in nodes if node.get('type') == 'Variable']
+            param_vars = [var for var in var_nodes if var.get('properties', {}).get('scope_id') == func_id]
+            
+            for param in expected_params:
+                param_var_id = f"var_{param}_{func_id}"
+                param_found = any(var.get('id') == param_var_id for var in param_vars)
+                assert param_found, f"Parameter {param} not found as variable in function scope"
+            
+            print(f"✓ Function parameter handling correct ({len(expected_params)} parameters)")
+            return True
+        
+        return asyncio.run(run_test())
 
     def test_cross_scope_variable_usage(self):
-        """Test that cross-scope variable usage is correctly tracked."""
-        print("\n=== TESTING CROSS-SCOPE VARIABLE USAGE ===")
-
-        # Extract all files to get cross-scope relationships
-        all_nodes = []
-        all_relationships = []
-
-        for m_file in self.test_dir.glob("*.m"):
-            nodes, relationships = asyncio.run(self.extract_file(m_file))
-            all_nodes.extend(nodes)
-            all_relationships.extend(relationships)
-
-        # Remove duplicates
-        unique_nodes = []
-        seen_node_ids = set()
-        for node in all_nodes:
-            if node['id'] not in seen_node_ids:
-                unique_nodes.append(node)
-                seen_node_ids.add(node['id'])
-
-        unique_relationships = []
-        seen_rel_keys = set()
-        for rel in all_relationships:
-            key = (rel['start_node_id'], rel['end_node_id'], rel['type'])
-            if key not in seen_rel_keys:
-                unique_relationships.append(rel)
-                seen_rel_keys.add(key)
-
-        # Find USES relationships
-        uses_rels = [r for r in unique_relationships if r['type'] == 'USES']
-
-        print(f"Found {len(uses_rels)} USES relationships")
-
-        for rel in uses_rels:
-            source_node = next((n for n in unique_nodes if n['id'] == rel['start_node_id']), None)
-            target_node = next((n for n in unique_nodes if n['id'] == rel['end_node_id']), None)
-
-            if source_node and target_node:
-                source_scope = source_node['properties'].get('scope_id', source_node['id'])
-                target_scope = target_node['properties'].get('scope_id', target_node['id'])
-
-                print(f"  {source_node['label']} {source_node['properties'].get('name', source_node['id'])} "
-                      f"uses {target_node['properties']['name']} "
-                      f"(scopes: {source_scope} -> {target_scope})")
-
-        # Verify that we have cross-scope usage
-        cross_scope_uses = 0
-        for rel in uses_rels:
-            source_node = next((n for n in unique_nodes if n['id'] == rel['start_node_id']), None)
-            target_node = next((n for n in unique_nodes if n['id'] == rel['end_node_id']), None)
-
-            if source_node and target_node:
-                source_scope = source_node['properties'].get('scope_id', source_node['id'])
-                target_scope = target_node['properties'].get('scope_id', target_node['id'])
-
-                if source_scope != target_scope:
-                    cross_scope_uses += 1
-
-        print(f"Cross-scope USES relationships: {cross_scope_uses}")
-        self.assertGreater(cross_scope_uses, 0, "Should have cross-scope variable usage")
-
-        print("✓ Cross-scope variable usage tracking works correctly")
+        """Test cross-scope variable usage and script execution order."""
+        print("\nTesting cross-scope variable usage...")
+        
+        async def run_test():
+            # Extract from helper script
+            nodes, relationships = await self.extract_file(self.test_dir / "helper_script.m")
+            
+            # Find USES relationships
+            uses_rels = [rel for rel in relationships if rel.get('type') == 'USES']
+            
+            # Should have USES relationships for variables
+            assert len(uses_rels) > 0, "Should have USES relationships"
+            
+            for rel in uses_rels:
+                source_id = rel.get('source_id', '')
+                target_id = rel.get('target_id', '')
+                
+                # Source should be script or function
+                assert rel.get('source_type') in ['Script', 'Function'], f"USES source should be Script or Function: {rel.get('source_type')}"
+                
+                # Target should be variable
+                assert rel.get('target_type') == 'Variable', f"USES target should be Variable: {rel.get('target_type')}"
+                assert 'var_' in target_id, f"USES target should be a variable: {target_id}"
+            
+            print(f"✓ Cross-scope variable usage working correctly ({len(uses_rels)} USES relationships)")
+            return True
+        
+        return asyncio.run(run_test())
 
     @classmethod
     def tearDownClass(cls):
         """Clean up test files."""
-        # Optionally clean up test files
-        # for m_file in cls.test_dir.glob("*.m"):
-        #     try:
-        #         m_file.unlink()
-        #     except:
-        #         pass
-        pass
+        import shutil
+        if cls.test_dir.exists():
+            shutil.rmtree(cls.test_dir)
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

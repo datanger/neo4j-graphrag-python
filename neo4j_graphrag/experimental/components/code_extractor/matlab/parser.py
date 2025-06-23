@@ -1,4 +1,4 @@
- # Copyright (c) "Neo4j"
+# Copyright (c) "Neo4j"
 # Neo4j Sweden AB [https://neo4j.com]
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -86,13 +86,15 @@ class MatlabCodeParser:
             # 处理输入参数
             for param in func_node['properties']['input_parameters']:
                 param_node = {
-                    'id': f"parameter_{param}_{func_name}_{self.current_file_path}",
-                    'labels': ['Parameter'],
+                    'id': f"var_{param}_{func_name}",
+                    'labels': ['Variable'],
                     'properties': {
                         'name': param,
-                        'type': 'input',
+                        'type': 'parameter',
                         'function_name': func_name,
-                        'file_path': self.current_file_path
+                        'file_path': self.current_file_path,
+                        'scope_id': func_name,
+                        'scope_type': 'function'
                     }
                 }
                 nodes.append(param_node)
@@ -101,7 +103,7 @@ class MatlabCodeParser:
                 param_edge = {
                     'source': func_node['id'],
                     'target': param_node['id'],
-                    'type': 'HAS_PARAMETER',
+                    'type': 'DEFINES',
                     'properties': {'parameter_type': 'input'}
                 }
                 edges.append(param_edge)
@@ -109,13 +111,15 @@ class MatlabCodeParser:
             # 处理输出变量
             for output_var in func_node['properties']['output_variables']:
                 output_node = {
-                    'id': f"output_{output_var}_{func_name}_{self.current_file_path}",
+                    'id': f"var_{output_var}_{func_name}",
                     'labels': ['Variable'],
                     'properties': {
                         'name': output_var,
                         'type': 'output',
                         'function_name': func_name,
-                        'file_path': self.current_file_path
+                        'file_path': self.current_file_path,
+                        'scope_id': func_name,
+                        'scope_type': 'function'
                     }
                 }
                 nodes.append(output_node)
@@ -124,8 +128,8 @@ class MatlabCodeParser:
                 output_edge = {
                     'source': func_node['id'],
                     'target': output_node['id'],
-                    'type': 'RETURNS',
-                    'properties': {}
+                    'type': 'DEFINES',
+                    'properties': {'parameter_type': 'output'}
                 }
                 edges.append(output_edge)
         
@@ -141,9 +145,10 @@ class MatlabCodeParser:
         if not re.search(function_pattern, self.current_content, re.MULTILINE):
             # 这是一个脚本文件
             script_name = self.current_file_path.split('/')[-1].replace('.m', '')
+            script_id = f"script_{script_name}_{self.current_file_path}"
             
             script_node = {
-                'id': f"script_{script_name}_{self.current_file_path}",
+                'id': script_id,
                 'labels': ['Script'],
                 'properties': {
                     'name': script_name,
@@ -154,6 +159,15 @@ class MatlabCodeParser:
                 }
             }
             nodes.append(script_node)
+            
+            # 提取脚本中的变量
+            var_nodes, var_edges = self.extract_variables_from_code(
+                self.current_content, 
+                script_id, 
+                self.current_file_path
+            )
+            nodes.extend(var_nodes)
+            edges.extend(var_edges)
         
         return nodes, edges
 
@@ -218,14 +232,16 @@ class MatlabCodeParser:
                         defined_vars.add(var_name)
                         
                         var_node = {
-                            'id': f"variable_{var_name}_{parent_id}",
+                            'id': f"var_{var_name}_{parent_id}",
                             'labels': ['Variable'],
                             'properties': {
                                 'name': var_name,
                                 'type': 'local',
                                 'defined_at': line_num + line_offset,
                                 'parent_id': parent_id,
-                                'file_path': file_path
+                                'file_path': file_path,
+                                'scope_id': parent_id,
+                                'scope_type': 'script' if 'script_' in parent_id else 'function'
                             }
                         }
                         nodes.append(var_node)

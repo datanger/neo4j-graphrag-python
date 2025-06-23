@@ -1,105 +1,234 @@
 #!/usr/bin/env python3
 """
-Debug script to test function parameter extraction
+Debug script for testing MATLAB function parameter extraction.
+This script helps debug issues with function parameter handling.
 """
 
-import asyncio
 import sys
-import os
+import asyncio
 from pathlib import Path
 
-# Add the project root to the Python path
+# Add the project root to the path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from neo4j_graphrag.experimental.components.code_extractor.matlab.matlab_extractor import MatlabExtractor
-from neo4j_graphrag.llm import LLMInterface
+from neo4j_graphrag.experimental.components.code_extractor.matlab.schema import SCHEMA
+from neo4j_graphrag.experimental.components.types import TextChunk
 
-class MockLLM(LLMInterface):
-    def __init__(self):
-        super().__init__(model_name="mock")
-
-    def invoke(self, input, message_history=None, system_instruction=None):
-        from neo4j_graphrag.llm import LLMResponse
-        return LLMResponse(content="Mock description")
-
-    async def ainvoke(self, input, message_history=None, system_instruction=None):
-        from neo4j_graphrag.llm import LLMResponse
-        return LLMResponse(content="Mock description")
-
-async def debug_function_params():
-    """Debug function parameter extraction."""
-
+def test_function_parameter_extraction():
+    """Test function parameter extraction with various function signatures."""
+    print("Testing function parameter extraction...")
+    
+    # Test cases with different function signatures
+    test_cases = [
+        {
+            "name": "Simple function",
+            "code": """
+function result = simple_function(input)
+    result = input * 2;
+end
+""",
+            "expected_params": ["input"],
+            "expected_returns": ["result"]
+        },
+        {
+            "name": "Multiple parameters",
+            "code": """
+function [out1, out2] = multi_param_function(in1, in2, in3)
+    out1 = in1 + in2;
+    out2 = in2 * in3;
+end
+""",
+            "expected_params": ["in1", "in2", "in3"],
+            "expected_returns": ["out1", "out2"]
+        },
+        {
+            "name": "No parameters",
+            "code": """
+function result = no_param_function()
+    result = 42;
+end
+""",
+            "expected_params": [],
+            "expected_returns": ["result"]
+        },
+        {
+            "name": "Complex function",
+            "code": """
+function [output1, output2, output3] = complex_function(input1, input2, input3, input4)
+    % This is a complex function with many parameters
+    output1 = input1 + input2;
+    output2 = input2 * input3;
+    output3 = input3 / input4;
+    
+    % Local variables
+    temp1 = output1 + output2;
+    temp2 = temp1 * output3;
+end
+""",
+            "expected_params": ["input1", "input2", "input3", "input4"],
+            "expected_returns": ["output1", "output2", "output3"]
+        }
+    ]
+    
     # Create extractor
-    llm = MockLLM()
-    extractor = MatlabExtractor(llm=llm, debug=True)
+    extractor = MatlabExtractor(use_llm=False)
+    
+    for test_case in test_cases:
+        print(f"\n--- Testing: {test_case['name']} ---")
+        
+        # Create chunk
+        chunk = TextChunk(
+            text=test_case['code'],
+            index=0,
+            metadata={"file_path": f"test_{test_case['name'].lower().replace(' ', '_')}.m"}
+        )
+        
+        # Extract using predefined SCHEMA
+        result = asyncio.run(extractor.extract_for_chunk(SCHEMA, "", chunk))
+        
+        if result and hasattr(result, 'nodes'):
+            nodes = result.nodes
+        else:
+            nodes = []
+            
+        if result and hasattr(result, 'relationships'):
+            relationships = result.relationships
+        else:
+            relationships = []
+        
+        # Find function node
+        function_nodes = [node for node in nodes if node.label == 'Function']
+        
+        if function_nodes:
+            func_node = function_nodes[0]
+            func_id = func_node.id
+            properties = func_node.properties
+            
+            print(f"Function ID: {func_id}")
+            print(f"Function name: {properties.get('name', 'N/A')}")
+            print(f"Parameters: {properties.get('input_parameters', 'N/A')}")
+            print(f"Returns: {properties.get('output_variables', 'N/A')}")
+            
+            # Check parameters
+            actual_params = properties.get('input_parameters', [])
+            expected_params = test_case['expected_params']
+            
+            if actual_params == expected_params:
+                print("✓ Parameters match expected")
+            else:
+                print(f"✗ Parameter mismatch: expected {expected_params}, got {actual_params}")
+            
+            # Check returns
+            actual_returns = properties.get('output_variables', [])
+            expected_returns = test_case['expected_returns']
+            
+            if actual_returns == expected_returns:
+                print("✓ Returns match expected")
+            else:
+                print(f"✗ Return mismatch: expected {expected_returns}, got {actual_returns}")
+            
+            # Check variable nodes for parameters
+            var_nodes = [node for node in nodes if node.label == 'Parameter']
+            param_vars = [var for var in var_nodes if var.properties.get('function_name') == properties.get('name')]
+            
+            print(f"Variables in function scope: {len(param_vars)}")
+            for var in param_vars:
+                var_props = var.properties
+                print(f"  - {var.id}: {var_props.get('name', 'N/A')} (type: {var_props.get('type', 'N/A')})")
+            
+            # Check that parameters are defined as variables
+            for param in expected_params:
+                param_found = any(var.properties.get('name') == param for var in param_vars)
+                if param_found:
+                    print(f"✓ Parameter '{param}' found as variable")
+                else:
+                    print(f"✗ Parameter '{param}' not found as variable")
+            
+        else:
+            print("✗ No function node found")
+        
+        # Check relationships
+        print(f"Total relationships: {len(relationships)}")
+        for rel in relationships:
+            rel_type = rel.type
+            source_id = rel.start_node_id
+            target_id = rel.end_node_id
+            print(f"  - {rel_type}: {source_id} -> {target_id}")
 
-    # Test file path
-    test_file = Path(__file__).parent / "examples" / "helper_function.m"
-
-    print(f"Testing file: {test_file}")
-    print(f"File exists: {test_file.exists()}")
-
-    if not test_file.exists():
-        print("Test file not found!")
-        return
-
-    # Read file content
-    with open(test_file, 'r', encoding='utf-8') as f:
-        content = f.read()
-
-    print(f"File content:\n{content}")
-
-    # Create text chunk
-    from neo4j_graphrag.experimental.components.types import TextChunk
+def test_variable_id_format():
+    """Test that variables follow the required ID format."""
+    print("\nTesting variable ID format...")
+    
+    test_code = """
+function [out1, out2] = test_function(in1, in2)
+    % Function with parameters and local variables
+    out1 = in1 * 2;
+    out2 = in2 + 10;
+    
+    % Local variable with same name as parameter
+    temp = out1 + out2;
+end
+"""
+    
+    # Create extractor
+    extractor = MatlabExtractor(use_llm=False)
+    
+    # Create chunk
     chunk = TextChunk(
-        text=content,
-        metadata={"file_path": str(test_file)},
-        index=0
+        text=test_code,
+        index=0,
+        metadata={"file_path": "test_variable_format.m"}
     )
+    
+    # Extract using predefined SCHEMA
+    result = asyncio.run(extractor.extract_for_chunk(SCHEMA, "", chunk))
+    
+    if result and hasattr(result, 'nodes'):
+        nodes = result.nodes
+    else:
+        nodes = []
+    
+    # Find variable nodes
+    var_nodes = [node for node in nodes if node.label == 'Variable']
+    
+    print(f"Found {len(var_nodes)} variable nodes:")
+    
+    for var in var_nodes:
+        var_id = var.id
+        properties = var.properties
+        name = properties.get('name', '')
+        scope_id = properties.get('scope_id', '')
+        scope_type = properties.get('scope_type', '')
+        
+        # Check ID format
+        expected_id = f"var_{name}_{scope_id}"
+        if var_id == expected_id:
+            print(f"✓ {var_id} (scope: {scope_type})")
+        else:
+            print(f"✗ {var_id} != {expected_id} (scope: {scope_type})")
+        
+        # Check required properties
+        if 'scope_id' in properties and 'scope_type' in properties:
+            print(f"  ✓ Has required properties")
+        else:
+            print(f"  ✗ Missing required properties")
 
-    # Extract
-    from neo4j_graphrag.experimental.components.schema import GraphSchema
-    schema = GraphSchema(node_types=[])
-
+def main():
+    """Run all debug tests."""
+    print("Debugging MATLAB function parameter extraction...\n")
+    
     try:
-        result = await extractor.extract_for_chunk(schema, "", chunk)
+        test_function_parameter_extraction()
+        test_variable_id_format()
+        print("\n✓ All debug tests completed")
+        return True
     except Exception as e:
+        print(f"\n✗ Debug test failed: {e}")
         import traceback
-        print("Exception during extraction:")
         traceback.print_exc()
-        return
-
-    print(f"\nExtraction result:")
-    print(f"Nodes: {len(result.nodes)}")
-    print(f"Relationships: {len(result.relationships)}")
-
-    # Find function node
-    function_nodes = [n for n in result.nodes if n.label == "Function"]
-    print(f"\nFunction nodes: {len(function_nodes)}")
-
-    for func_node in function_nodes:
-        print(f"Function: {func_node.properties.get('name')}")
-        print(f"Parameters: {func_node.properties.get('parameters')}")
-        print(f"Function ID: {func_node.id}")
-
-        # Find DEFINES relationships
-        defines_rels = [r for r in result.relationships
-                       if r.start_node_id == func_node.id and r.type == "DEFINES"]
-        print(f"DEFINES relationships: {len(defines_rels)}")
-
-        for rel in defines_rels:
-            target_node = next((n for n in result.nodes if n.id == rel.end_node_id), None)
-            if target_node:
-                print(f"  - {target_node.properties.get('name')} (scope_id: {target_node.properties.get('scope_id')})")
-
-        # Find variable nodes with matching scope_id
-        param_vars = [n for n in result.nodes
-                     if n.label == "Variable" and
-                     n.properties.get('scope_id') == func_node.id]
-        print(f"Variables with matching scope_id: {len(param_vars)}")
-
-        for var in param_vars:
-            print(f"  - {var.properties.get('name')} (scope_id: {var.properties.get('scope_id')})")
+        return False
 
 if __name__ == "__main__":
-    asyncio.run(debug_function_params())
+    success = main()
+    sys.exit(0 if success else 1)
