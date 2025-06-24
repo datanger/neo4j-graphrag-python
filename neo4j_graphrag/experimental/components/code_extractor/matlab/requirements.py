@@ -60,7 +60,7 @@ SCHEMA = GraphSchema(
     ],
     patterns=[
         ("Function", "CALLS", "Function"),
-        ("Function", "CALLS", "Script"),
+        # ("Function", "CALLS", "Script"),
         ("Script", "CALLS", "Function"),
         ("Script", "CALLS", "Script"),
         ("Function", "USES", "Variable"),
@@ -68,14 +68,14 @@ SCHEMA = GraphSchema(
         ("Function", "DEFINES", "Variable"),
         ("Script", "DEFINES", "Variable"),
         ("Script", "DEFINES", "Function"),
-        ("Function", "MODIFIES", "Variable"),
+        # ("Function", "MODIFIES", "Variable"),
         ("Script", "MODIFIES", "Variable"),
         ("Variable", "ASSIGNED_TO", "Variable"),
     ],
 )
 
 
-REQUIREMENTS = """
+SCHEMA_DESCRIPTION = """
 **关系模式说明：**
 
 1. **CALLS 关系**：
@@ -167,6 +167,10 @@ REQUIREMENTS = """
 - 清晰的作用域边界
 - 便于可视化展示
 - 支持正确的变量依赖分析
+
+"""
+
+REQUIREMENTS = """
 
 """
 

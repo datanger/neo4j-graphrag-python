@@ -29,6 +29,7 @@ from datetime import datetime
 import numpy as np
 from typing import List, Optional, Union
 import sys
+from tqdm import tqdm
 
 # Add comprehensive logging to see all steps
 logging.basicConfig(
@@ -341,7 +342,11 @@ async def process_matlab_files(directory: str, llm: LLMInterface, entry_script_p
 
     # After processing all files, run the post-processing step once on the aggregated graph
     print("Applying final cross-file relationship post-processing...")
-    final_graph = MatlabPostProcessor().post_process_cross_file_relationships(result_graph)
+    with tqdm(total=9, desc="Post-processing graph") as pbar:
+        final_graph = MatlabPostProcessor().post_process_cross_file_relationships(
+            result_graph,
+            progress=pbar
+        )
 
     # Return the combined result graph
     result = type('Result', (), {'graph': final_graph})()
@@ -355,7 +360,7 @@ async def process_matlab_files(directory: str, llm: LLMInterface, entry_script_p
 
         node_id = getattr(node, 'id', f'node_{i}')
         node_label = getattr(node, 'label', 'UNKNOWN')
-        print(f"\nValidating node {i} ({node_label}): {node_id}")
+        # print(f"\nValidating node {i} ({node_label}): {node_id}")
 
         # Convert line_range if it exists
         if 'line_range' in node.properties:
@@ -385,7 +390,7 @@ async def process_matlab_files(directory: str, llm: LLMInterface, entry_script_p
 
         rel_type = getattr(rel, 'type', 'UNKNOWN')
         rel_id = f"{getattr(rel, 'start_node_id', '?')} -[{rel_type}]-> {getattr(rel, 'end_node_id', '?')}"
-        print(f"\nValidating relationship {i}: {rel_id}")
+        # print(f"\nValidating relationship {i}: {rel_id}")
 
         # Validate and convert all properties
         rel.properties = validate_properties(rel.properties, f"relationship {i}")
@@ -442,7 +447,7 @@ async def main():
     parser = argparse.ArgumentParser(description='MATLAB Code Knowledge Graph Builder')
     parser.add_argument('--matlab_dir', type=str, default="tests/matlab_test/test_data",
                        help='Directory containing MATLAB files')
-    parser.add_argument('--entry_script', type=str, default=None,
+    parser.add_argument('--entry_script', type=str, default="tests/matlab_test/test_data/PredictMaskedTokensUsingBERT.m",
                        help='Path to the entry script for execution flow analysis')
     parser.add_argument('--rebuild_data', action='store_true',
                        help='Rebuild all data instead of using existing data')
@@ -649,6 +654,106 @@ async def main():
         # Print total counts
         print(f"\nTotal Nodes Written: {len(neo4j_nodes)}")
         print(f"Total Relationships Written: {len(neo4j_relationships)}")
+        
+        # Add comprehensive pattern analysis
+        print("\n=== Pattern Analysis ===")
+        
+        # Define expected patterns from requirements.py
+        expected_patterns = [
+            ("Function", "CALLS", "Function"),
+            # ("Function", "CALLS", "Script"),
+            ("Script", "CALLS", "Function"),
+            ("Script", "CALLS", "Script"),
+            ("Function", "USES", "Variable"),
+            ("Script", "USES", "Variable"),
+            ("Function", "DEFINES", "Variable"),
+            ("Script", "DEFINES", "Variable"),
+            ("Script", "DEFINES", "Function"),
+            # ("Function", "MODIFIES", "Variable"),
+            ("Script", "MODIFIES", "Variable"),
+            ("Variable", "ASSIGNED_TO", "Variable"),
+        ]
+        
+        # Analyze actual patterns found
+        actual_patterns = {}
+        for rel in neo4j_relationships:
+            # Get start node type
+            start_node_type = None
+            for node in neo4j_nodes:
+                if node.id == rel.start_node_id:
+                    # Map VariableUse to Variable for pattern matching
+                    if node.label == 'VariableUse':
+                        start_node_type = 'Variable'
+                    else:
+                        start_node_type = node.label
+                    break
+            
+            # Get end node type
+            end_node_type = None
+            end_node_found = False
+            for node in neo4j_nodes:
+                if node.id == rel.end_node_id:
+                    # Map VariableUse to Variable for pattern matching
+                    if node.label == 'VariableUse':
+                        end_node_type = 'Variable'
+                    else:
+                        end_node_type = node.label
+                    end_node_found = True
+                    break
+            
+            # Handle cases where target node doesn't exist (e.g., built-in functions)
+            if not end_node_found:
+                if rel.type == 'CALLS':
+                    # For CALLS relationships, infer the target type from the ID
+                    if rel.end_node_id.startswith('function_'):
+                        end_node_type = 'Function'
+                    elif rel.end_node_id.startswith('script_'):
+                        end_node_type = 'Script'
+                    else:
+                        end_node_type = 'Unknown'
+                else:
+                    end_node_type = 'Unknown'
+            
+            if start_node_type and end_node_type:
+                pattern = (start_node_type, rel.type, end_node_type)
+                actual_patterns[pattern] = actual_patterns.get(pattern, 0) + 1
+        
+        print("\nExpected Patterns (from requirements.py):")
+        for pattern in expected_patterns:
+            count = actual_patterns.get(pattern, 0)
+            status = "✓" if count > 0 else "✗"
+            print(f"{status} {pattern[0]} -[{pattern[1]}]-> {pattern[2]}: {count} instances")
+        
+        print("\nUnexpected Patterns Found:")
+        unexpected_found = False
+        for pattern, count in actual_patterns.items():
+            if pattern not in expected_patterns:
+                print(f"  {pattern[0]} -[{pattern[1]}]-> {pattern[2]}: {count} instances")
+                unexpected_found = True
+        
+        if not unexpected_found:
+            print("  None")
+        
+        # Summary statistics
+        total_expected_patterns = len(expected_patterns)
+        found_patterns = sum(1 for pattern in expected_patterns if actual_patterns.get(pattern, 0) > 0)
+        missing_patterns = total_expected_patterns - found_patterns
+        
+        print(f"\nPattern Coverage:")
+        print(f"- Expected patterns: {total_expected_patterns}")
+        print(f"- Found patterns: {found_patterns}")
+        print(f"- Missing patterns: {missing_patterns}")
+        print(f"- Coverage: {found_patterns/total_expected_patterns*100:.1f}%")
+        
+        if missing_patterns > 0:
+            print(f"\nMissing Pattern Types:")
+            missing_types = set()
+            for pattern in expected_patterns:
+                if actual_patterns.get(pattern, 0) == 0:
+                    missing_types.add(pattern[1])
+            for rel_type in sorted(missing_types):
+                print(f"- {rel_type}")
+        
         print("================================\n")
 
     except Exception as e:

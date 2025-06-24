@@ -17,9 +17,54 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Dict, List, Optional, Union
+import json
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union, Set
 
 logger = logging.getLogger(__name__)
+
+# Common MATLAB keyword set for filtering uninteresting identifiers
+_MATLAB_KEYWORDS = {
+    'if','for','while','function','end','else','elseif','return','break','continue',
+    'switch','case','otherwise','try','catch','classdef','properties','methods',
+    'true','false','pi','inf','nan','eps','realmax','realmin','i','j'
+}
+
+# Cache for builtin function names
+_BUILTIN_FUNCS: Optional[Set[str]] = None
+
+def get_matlab_builtin_functions() -> Set[str]:
+    """Return a set of MATLAB builtin function names (lower-case)."""
+    global _BUILTIN_FUNCS
+    if _BUILTIN_FUNCS is None:
+        builtin_path = Path(__file__).with_name('matlab_builtin_functions.json')
+        try:
+            with builtin_path.open('r', encoding='utf-8') as f:
+                _BUILTIN_FUNCS = {name.lower() for name in json.load(f)}
+        except Exception as e:
+            logger.warning("Failed to load builtin function list: %s", e)
+            _BUILTIN_FUNCS = set()
+    return _BUILTIN_FUNCS
+
+
+def _remove_strings(line: str) -> str:
+    """Remove single- or double-quoted string literals from a line, preserving length."""
+    result = []
+    in_single = False
+    in_double = False
+    for ch in line:
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            result.append(' ')
+        elif ch == '"' and not in_single:
+            in_double = not in_double
+            result.append(' ')
+        elif in_single or in_double:
+            result.append(' ')  # mask content
+        else:
+            result.append(ch)
+    return ''.join(result)
+
 
 
 def ensure_neo4j_compatible(value: Any) -> Any:
@@ -44,75 +89,88 @@ def get_code_snippet(node: Dict[str, Any], max_length: int = 500) -> str:
     return code
 
 
-def extract_variables_from_code(code: str) -> List[str]:
-    """从代码中提取变量名"""
-    variables = set()
-    
-    # 变量定义模式
-    var_def_patterns = [
-        r'^\s*([a-zA-Z_]\w*)\s*=\s*',  # 简单赋值
-        r'^\s*([a-zA-Z_]\w*)\s*=\s*\[',  # 数组赋值
-        r'^\s*([a-zA-Z_]\w*)\s*=\s*{',   # 元胞数组赋值
-        r'^\s*([a-zA-Z_]\w*)\s*=\s*struct\(',  # 结构体赋值
-    ]
-    
-    lines = code.split('\n')
-    for line in lines:
-        line = line.strip()
-        if not line or line.startswith('%'):
+def extract_variables_from_code(code: str, min_length: int = 2) -> List[str]:
+    """Extract meaningful variable names from MATLAB code string.
+
+    Rules:
+    1. Skip comment-only lines (starting with '%').
+    2. Remove quoted strings before regex scans.
+    3. Ignore MATLAB keywords and identifiers shorter than *min_length*.
+    """
+    variables: Set[str] = set()
+    # Assignment beginning of line
+    assign_regex = re.compile(r'^\s*([a-zA-Z_]\w*)\s*=')
+    # Generic identifier pattern
+    ident_regex = re.compile(r'\b([a-zA-Z_]\w*)\b')
+
+    for raw_line in code.split('\n'):
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith('%'):
             continue
-        
-        for pattern in var_def_patterns:
-            match = re.match(pattern, line)
-            if match:
-                variables.add(match.group(1))
-                break
-    
-    return list(variables)
+
+        clean_line = _remove_strings(stripped)
+
+        # Direct assignment at start of line
+        m = assign_regex.match(clean_line)
+        if m:
+            name = m.group(1)
+            if len(name) >= min_length and name not in _MATLAB_KEYWORDS:
+                variables.add(name)
+            # still scan rest for other identifiers after '=' (e.g., a=b):
+            remainder = clean_line[m.end():]
+            clean_line = remainder  # fall through to generic scan
+
+        for match in ident_regex.finditer(clean_line):
+            name = match.group(1)
+            if len(name) >= min_length and name not in _MATLAB_KEYWORDS:
+                variables.add(name)
+
+    return sorted(variables)
 
 
 def extract_function_calls_from_code(code: str) -> List[str]:
-    """从代码中提取函数调用"""
-    function_calls = set()
-    
-    # 函数调用模式
-    func_call_pattern = r'\b([a-zA-Z_]\w*)\s*\('
-    
-    for match in re.finditer(func_call_pattern, code):
-        func_name = match.group(1)
-        
-        # 跳过MATLAB关键字
-        if func_name in ['if', 'for', 'while', 'function', 'end', 'else', 'elseif', 'return', 'break', 'continue']:
+    """Extract function calls, ignoring comments, strings, and MATLAB keywords."""
+    result: Set[str] = set()
+    call_regex = re.compile(r'\b([a-zA-Z_]\w*)\s*\(')
+
+    for raw_line in code.split('\n'):
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith('%'):
             continue
-        
-        function_calls.add(func_name)
-    
-    return list(function_calls)
+        clean_line = _remove_strings(stripped)
+        for match in call_regex.finditer(clean_line):
+            name = match.group(1)
+            if name not in _MATLAB_KEYWORDS:
+                result.add(name)
+
+    return sorted(result)
 
 
 def extract_script_calls_from_code(code: str) -> List[str]:
-    """从代码中提取脚本调用"""
-    script_calls = set()
-    
-    # 脚本调用模式
-    script_call_patterns = [
-        r'^\s*([a-zA-Z_]\w*)\s*;',  # 直接脚本调用
-        r"run\s*\(\s*['\"]([^'\"]+)['\"]\s*\)",  # run()函数调用
-    ]
-    
-    lines = code.split('\n')
-    for line in lines:
-        line = line.strip()
-        if not line or line.startswith('%'):
+    """Extract script invocations (direct or via run()), skipping comments/strings."""
+    result: Set[str] = set()
+    direct_regex = re.compile(r'^\s*([a-zA-Z_]\w*)\s*;')
+    run_regex = re.compile(r"run\s*\(\s*['\"]([^'\"]+)['\"]\s*\)")
+
+    for raw_line in code.split('\n'):
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith('%'):
             continue
-        
-        for pattern in script_call_patterns:
-            match = re.match(pattern, line)
-            if match:
-                script_calls.add(match.group(1))
-                break
-    
-    return list(script_calls)
+        clean_line = _remove_strings(stripped)
+
+        m = direct_regex.match(clean_line)
+        if m:
+            name = m.group(1)
+            if name not in _MATLAB_KEYWORDS:
+                result.add(name.replace('.m', ''))
+            continue
+
+        for m in run_regex.finditer(clean_line):
+            name = m.group(1)
+            if name:
+                result.add(name.replace('.m', ''))
+
+    return sorted(result)
 
 
 def get_line_number(text: str, offset: int = 0) -> int:

@@ -332,8 +332,8 @@ class MatlabExtractor(LLMEntityRelationExtractor):
                 await self._generate_descriptions()
             
             # 不进行后处理
-            # if self.enable_post_processing:
-            #     self._post_process()
+            if self.enable_post_processing:
+                self._post_process()
             
             # 构建Neo4j图
             graph = Neo4jGraph(nodes=self.nodes, relationships=self.relationships)
