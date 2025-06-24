@@ -41,7 +41,7 @@ import asyncio
 import neo4j
 from neo4j_graphrag.llm.base import LLMInterface
 from neo4j_graphrag.experimental.components.code_extractor.matlab.matlab_extractor import (
-    MatlabExtractor, MatlabExtractionResult, _global_registry
+    MatlabExtractor, MatlabExtractionResult, get_global_registry
 )
 from neo4j_graphrag.experimental.components.entity_relation_extractor import (
     LLMEntityRelationExtractor,
@@ -66,6 +66,7 @@ from neo4j_graphrag.experimental.pipeline import Pipeline
 from neo4j_graphrag.experimental.pipeline.component import DataModel
 from neo4j_graphrag.generation.prompts import PromptTemplate
 from neo4j_graphrag.experimental.components.code_extractor.matlab.requirements import EXAMPLES, SCHEMA
+from neo4j_graphrag.experimental.components.code_extractor.matlab.post_processor import MatlabPostProcessor
 
 
 class Neo4jGraphResult(DataModel):
@@ -340,7 +341,7 @@ async def process_matlab_files(directory: str, llm: LLMInterface, entry_script_p
 
     # After processing all files, run the post-processing step once on the aggregated graph
     print("Applying final cross-file relationship post-processing...")
-    final_graph = MatlabExtractor.post_process_cross_file_relationships(result_graph)
+    final_graph = MatlabPostProcessor().post_process_cross_file_relationships(result_graph)
 
     # Return the combined result graph
     result = type('Result', (), {'graph': final_graph})()
@@ -439,7 +440,7 @@ async def main():
     import argparse
     
     parser = argparse.ArgumentParser(description='MATLAB Code Knowledge Graph Builder')
-    parser.add_argument('--matlab_dir', type=str, default="tests/matlab_test/examples",
+    parser.add_argument('--matlab_dir', type=str, default="tests/matlab_test/test_data",
                        help='Directory containing MATLAB files')
     parser.add_argument('--entry_script', type=str, default=None,
                        help='Path to the entry script for execution flow analysis')
@@ -487,28 +488,36 @@ async def main():
         rebuild_data = args.rebuild_data
         
         # 检查是否存在已构建的数据
-        existing_data = len(_global_registry.all_nodes) > 0
+        existing_data = len(get_global_registry().all_nodes) > 0
         
-        if not existing_data:
-            print("No existing data found, building from scratch...")
-            rebuild_data = True
-        elif rebuild_data:
-            print("Rebuild flag set, rebuilding all data...")
-            # 清除现有数据
-            _global_registry.reset_global_registry()
-        else:
-            print("Using existing data, only updating post-processing...")
-
         # Process MATLAB files and get the extraction result
-        if rebuild_data:
-            # 重新构建所有数据
+        if not existing_data or rebuild_data:
+            if not existing_data:
+                print("No existing data found, building from scratch...")
+            else:
+                print("Rebuild flag set, rebuilding all data...")
+                # 清除现有数据
+                get_global_registry().reset_global_registry()
+            
+            # 处理MATLAB文件
             result = await process_matlab_files(matlab_dir, llm, entry_script_path)
         else:
+            print("Using existing data, only updating post-processing...")
             # 只更新后处理
             result = await process_matlab_files_post_processing_only(matlab_dir, llm, entry_script_path)
             
         graph = result.graph  # Access the Neo4jGraph from the result
         print(f"Extracted graph with {len(graph.nodes)} nodes and {len(graph.relationships)} relationships")
+        
+        # Add debug information
+        print(f"DEBUG: Original graph nodes: {len(graph.nodes)}")
+        print(f"DEBUG: Original graph relationships: {len(graph.relationships)}")
+        
+        # Print first few nodes and relationships for debugging
+        if graph.nodes:
+            print(f"DEBUG: First node: {graph.nodes[0]}")
+        if graph.relationships:
+            print(f"DEBUG: First relationship: {graph.relationships[0]}")
 
         # Initialize Neo4j writer
         writer = Neo4jWriter(
@@ -521,6 +530,7 @@ async def main():
         relationships = []
 
         # Process nodes with property validation
+        print(f"DEBUG: Processing {len(graph.nodes)} nodes...")
         for node in graph.nodes:
             try:
                 node_dict = dict(node)
@@ -543,6 +553,7 @@ async def main():
                 print(f"Error processing node {getattr(node, 'id', '?')}: {e}")
 
         # Process relationships with property validation
+        print(f"DEBUG: Processing {len(graph.relationships)} relationships...")
         for rel in graph.relationships:
             try:
                 rel_dict = dict(rel)
@@ -565,6 +576,7 @@ async def main():
             except Exception as e:
                 print(f"Error processing relationship: {e}")
 
+        print(f"DEBUG: After processing - nodes: {len(nodes)}, relationships: {len(relationships)}")
         print(f"Processed {len(nodes)} nodes and {len(relationships)} relationships with Neo4j-compatible types")
 
         # Create a clean Neo4jGraph object with validated data
@@ -606,6 +618,38 @@ async def main():
         print(f"Writing {len(neo4j_nodes)} nodes and {len(neo4j_relationships)} relationships to Neo4j...")
         writer_result = await writer.run(neo4j_graph)
         print(f"Successfully wrote to Neo4j: {writer_result.status}")
+
+        # Print summary of nodes and relationships by type
+        print("\n=== Neo4j Write Summary ===")
+        
+        # Count nodes by label
+        node_counts = {}
+        for node in neo4j_nodes:
+            label = node.label
+            node_counts[label] = node_counts.get(label, 0) + 1
+        
+        # Print node counts
+        print("\nNode Types Written:")
+        for node_type in SCHEMA.node_types:
+            count = node_counts.get(node_type.label, 0)
+            print(f"- {node_type.label}: {count}")
+        
+        # Count relationships by type
+        rel_counts = {}
+        for rel in neo4j_relationships:
+            rel_type = rel.type
+            rel_counts[rel_type] = rel_counts.get(rel_type, 0) + 1
+        
+        # Print relationship counts
+        print("\nRelationship Types Written:")
+        for rel_type in SCHEMA.relationship_types:
+            count = rel_counts.get(rel_type.label, 0)
+            print(f"- {rel_type.label}: {count}")
+        
+        # Print total counts
+        print(f"\nTotal Nodes Written: {len(neo4j_nodes)}")
+        print(f"Total Relationships Written: {len(neo4j_relationships)}")
+        print("================================\n")
 
     except Exception as e:
         print(f"An error occurred in main: {e}")

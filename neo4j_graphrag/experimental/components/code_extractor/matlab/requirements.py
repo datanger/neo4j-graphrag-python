@@ -1,4 +1,4 @@
-from neo4j_graphrag.experimental.components.code_extractor.matlab.schema import GraphSchema, NodeType, PropertyType, RelationshipType
+from neo4j_graphrag.experimental.components.schema import GraphSchema, NodeType, PropertyType, RelationshipType
 
 # Schema definitions for MATLAB code analysis
 SCHEMA = GraphSchema(
