@@ -18,6 +18,13 @@
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
+
+# 添加项目根目录到Python路径
+project_root = Path(__file__).parent.parent.parent.parent.parent
+sys.path.insert(0, str(project_root))
+
 import asyncio
 import json
 import logging
@@ -68,6 +75,7 @@ from neo4j_graphrag.experimental.pipeline.component import DataModel
 from neo4j_graphrag.generation.prompts import PromptTemplate
 from neo4j_graphrag.experimental.components.code_extractor.matlab.requirements import EXAMPLES, SCHEMA
 from neo4j_graphrag.experimental.components.code_extractor.matlab.post_processor import MatlabPostProcessor
+from neo4j_graphrag.experimental.components.code_extractor.matlab.entry_script_driven_processor import EntryScriptDrivenProcessor
 
 
 class Neo4jGraphResult(DataModel):
@@ -300,17 +308,25 @@ async def process_matlab_files(directory: str, llm: LLMInterface, entry_script_p
     # extractor = LLMEntityRelationExtractor(llm=llm, prompt_template=CodeExtractionTemplate())
     extractor = MatlabExtractor(llm=llm, entry_script_path=entry_script_path)
 
+    # Initialize the entry script driven processor
+    entry_processor = EntryScriptDrivenProcessor()
+    entry_processor.set_entry_script(entry_script_path)
+
     # Find all .m files in the directory
     matlab_files = list(Path(directory).rglob("*.m"))
 
     # Initialize result with empty graph
     result_graph = Neo4jGraph()
 
-    # Process each file individually
+    # Process each file individually - 只进行解析，不进行后处理
     for file_path in matlab_files:
         # Read the file content
         with open(file_path, 'r', encoding='utf-8') as f:
             content = f.read()
+
+        # Register script variables with the entry processor
+        script_name = file_path.stem
+        entry_processor.register_script_variables(script_name, content)
 
         # Create a text chunk with required fields
         chunk = TextChunk(
@@ -325,14 +341,14 @@ async def process_matlab_files(directory: str, llm: LLMInterface, entry_script_p
             metadata={"name": file_path.name}
         )
 
-        # Process the current file, but disable post-processing inside the loop
+        # Process the current file,但禁用后处理 - 确保只生成同作用域关系
         file_result = await extractor.run(
             chunks=TextChunks(chunks=[chunk]),
             schema=SCHEMA,
             document_info=doc_info,
             lexical_graph_config=LexicalGraphConfig(),
             examples=EXAMPLES,
-            enable_post_processing=False,
+            enable_post_processing=False,  # 关键：禁用后处理
         )
 
         # Merge the results
@@ -340,13 +356,74 @@ async def process_matlab_files(directory: str, llm: LLMInterface, entry_script_p
             result_graph.nodes.extend(file_result.graph.nodes)
             result_graph.relationships.extend(file_result.graph.relationships)
 
-    # After processing all files, run the post-processing step once on the aggregated graph
-    print("Applying final cross-file relationship post-processing...")
-    with tqdm(total=9, desc="Post-processing graph") as pbar:
-        final_graph = MatlabPostProcessor().post_process_cross_file_relationships(
-            result_graph,
-            progress=pbar
-        )
+    # 注册启动脚本的变量使用（关键：确保跨作用域关系能正确生成）
+    if entry_script_path and Path(entry_script_path).exists():
+        with open(entry_script_path, 'r', encoding='utf-8') as f:
+            entry_content = f.read()
+        entry_script_name = Path(entry_script_path).stem
+        entry_processor.register_script_variables("entry_script", entry_content)
+        print(f"Registered entry script variables: {entry_script_name}")
+
+    # After processing all files, run the entry script driven post-processing
+    print("Applying entry script driven cross-file relationship post-processing...")
+    print(f"Entry script: {entry_script_path}")
+
+    # Get execution summary before processing
+    summary = entry_processor.get_execution_summary()
+    print(f"Execution order: {summary['execution_order']}")
+    print(f"Total scripts: {summary['total_scripts']}")
+
+    # Apply the entry script driven post-processing
+    final_graph = entry_processor.process_cross_scope_relationships(result_graph)
+
+    # Ensure structural binding for all nodes
+    print("Ensuring structural binding for all nodes...")
+    binding_results = entry_processor.ensure_structural_binding(final_graph)
+
+    # Print binding results
+    print(f"\nStructural Binding Results:")
+    print(f"  Variables already bound: {binding_results['variables_already_bound']}")
+    print(f"  Variables fixed: {binding_results['variables_fixed']}")
+    print(f"  Functions already bound: {binding_results['functions_already_bound']}")
+    print(f"  Functions fixed: {binding_results['functions_fixed']}")
+    print(f"  Orphaned variables: {len(binding_results['orphaned_variables'])}")
+    print(f"  Orphaned functions: {len(binding_results['orphaned_functions'])}")
+
+    if binding_results['orphaned_variables']:
+        print(f"\nWarning: Found {len(binding_results['orphaned_variables'])} orphaned variables")
+        for issue in binding_results['orphaned_variables'][:3]:  # 只显示前3个
+            print(f"  - {issue['var_name']} in {issue['node_id']}: {issue['issue']}")
+
+    if binding_results['orphaned_functions']:
+        print(f"\nWarning: Found {len(binding_results['orphaned_functions'])} orphaned functions")
+        for issue in binding_results['orphaned_functions'][:3]:  # 只显示前3个
+            print(f"  - {issue['func_name']} in {issue['node_id']}: {issue['issue']}")
+
+    # Validate variable scope binding
+    print("Validating variable scope binding...")
+    validation_results = entry_processor.validate_variable_scope_binding(final_graph)
+
+    # Print validation summary
+    print(f"\nVariable Scope Binding Validation Summary:")
+    print(f"  Total variables: {validation_results['total_variables']}")
+    print(f"  Properly bound: {validation_results['properly_bound']}")
+    print(f"  Unbound variables: {len(validation_results['unbound_variables'])}")
+    print(f"  Scope issues: {len(validation_results['scope_issues'])}")
+    print(f"  Duplicate variables: {len(validation_results['duplicate_variables'])}")
+
+    if validation_results['unbound_variables']:
+        print(f"\nWarning: Found {len(validation_results['unbound_variables'])} unbound variables")
+        for issue in validation_results['unbound_variables'][:3]:  # 只显示前3个
+            print(f"  - {issue['var_name']} in {issue['node_id']}: {issue['issue']}")
+
+    if validation_results['duplicate_variables']:
+        print(f"\nWarning: Found {len(validation_results['duplicate_variables'])} duplicate variables")
+        for issue in validation_results['duplicate_variables'][:3]:  # 只显示前3个
+            print(f"  - {issue['var_name']}: {len(issue['nodes'])} nodes in {len(issue['scopes'])} scopes")
+
+    # Get final summary
+    final_summary = entry_processor.get_execution_summary()
+    print(f"Added {final_summary['cross_scope_relationships']} cross-scope relationships")
 
     # Return the combined result graph
     result = type('Result', (), {'graph': final_graph})()
@@ -399,34 +476,34 @@ async def process_matlab_files(directory: str, llm: LLMInterface, entry_script_p
 
 async def process_matlab_files_post_processing_only(directory: str, llm: LLMInterface, entry_script_path: str = None) -> 'MatlabExtractionResult':
     """Process MATLAB files with post-processing only, using existing data.
-    
+
     This function is used when we want to update only the post-processing
     without rebuilding all the data from scratch.
-    
+
     Args:
         directory: Directory containing MATLAB files
         llm: Language model interface
         entry_script_path: Path to entry script for execution flow analysis
-        
+
     Returns:
         MatlabExtractionResult: The result containing the extracted graph
     """
     # Initialize the extractor with the LLM and entry script
     extractor = MatlabExtractor(llm=llm, entry_script_path=entry_script_path)
-    
+
     # Create a dummy chunk to trigger post-processing
     dummy_chunk = TextChunk(
         text="",
         index=0,
         metadata={"file_path": "dummy", "file_name": "dummy.m", "code_type": "matlab"}
     )
-    
+
     # Create dummy document info
     doc_info = DocumentInfo(
         path="dummy",
         metadata={"name": "dummy"}
     )
-    
+
     # Run with rebuild_data=False to use existing data
     result = await extractor.run(
         chunks=TextChunks(chunks=[dummy_chunk]),
@@ -437,13 +514,13 @@ async def process_matlab_files_post_processing_only(directory: str, llm: LLMInte
         enable_post_processing=True,
         rebuild_data=False,
     )
-    
+
     return result
 
 async def main():
     # 解析命令行参数
     import argparse
-    
+
     parser = argparse.ArgumentParser(description='MATLAB Code Knowledge Graph Builder')
     parser.add_argument('--matlab_dir', type=str, default="tests/matlab_test/test_data",
                        help='Directory containing MATLAB files')
@@ -459,9 +536,9 @@ async def main():
                        help='Neo4j password')
     parser.add_argument('--neo4j_db', type=str, default="neo4j",
                        help='Neo4j database name')
-    
+
     args = parser.parse_args()
-    
+
     # Initialize LLM
     llm = MockLLM()
 
@@ -491,10 +568,10 @@ async def main():
 
         # 检查是否需要重新构建数据
         rebuild_data = args.rebuild_data
-        
+
         # 检查是否存在已构建的数据
         existing_data = len(get_global_registry().all_nodes) > 0
-        
+
         # Process MATLAB files and get the extraction result
         if not existing_data or rebuild_data:
             if not existing_data:
@@ -503,21 +580,29 @@ async def main():
                 print("Rebuild flag set, rebuilding all data...")
                 # 清除现有数据
                 get_global_registry().reset_global_registry()
-            
+
             # 处理MATLAB文件
             result = await process_matlab_files(matlab_dir, llm, entry_script_path)
         else:
             print("Using existing data, only updating post-processing...")
             # 只更新后处理
             result = await process_matlab_files_post_processing_only(matlab_dir, llm, entry_script_path)
-            
+
         graph = result.graph  # Access the Neo4jGraph from the result
         print(f"Extracted graph with {len(graph.nodes)} nodes and {len(graph.relationships)} relationships")
-        
+
         # Add debug information
         print(f"DEBUG: Original graph nodes: {len(graph.nodes)}")
         print(f"DEBUG: Original graph relationships: {len(graph.relationships)}")
-        
+
+        # Print all USES relationships for debug
+        print("\n=== DEBUG: 所有 USES 关系 ===")
+        for rel in graph.relationships:
+            if rel.type == 'USES':
+                start_label = next((n.label for n in graph.nodes if n.id == rel.start_node_id), None)
+                end_label = next((n.label for n in graph.nodes if n.id == rel.end_node_id), None)
+                print(f"{rel.start_node_id} ({start_label}) -[USES]-> {rel.end_node_id} ({end_label})")
+
         # Print first few nodes and relationships for debugging
         if graph.nodes:
             print(f"DEBUG: First node: {graph.nodes[0]}")
@@ -613,7 +698,7 @@ async def main():
                 )
                 neo4j_relationships.append(neo4j_rel)
             except Exception as e:
-                rel_id = f"{rel.get('start_node_id', '?')} -[{rel.get('type', '?')}]-> {rel.get('end_node_id', '?')}"
+                rel_id = f"{rel.get('start_node_id', '?')} -[{rel.get('type', '?')}] -> {rel.get('end_node_id', '?')}"
                 print(f"Error creating relationship {rel_id}: {e}")
 
         # Create the final graph
@@ -626,38 +711,38 @@ async def main():
 
         # Print summary of nodes and relationships by type
         print("\n=== Neo4j Write Summary ===")
-        
+
         # Count nodes by label
         node_counts = {}
         for node in neo4j_nodes:
             label = node.label
             node_counts[label] = node_counts.get(label, 0) + 1
-        
+
         # Print node counts
         print("\nNode Types Written:")
         for node_type in SCHEMA.node_types:
             count = node_counts.get(node_type.label, 0)
             print(f"- {node_type.label}: {count}")
-        
+
         # Count relationships by type
         rel_counts = {}
         for rel in neo4j_relationships:
             rel_type = rel.type
             rel_counts[rel_type] = rel_counts.get(rel_type, 0) + 1
-        
+
         # Print relationship counts
         print("\nRelationship Types Written:")
         for rel_type in SCHEMA.relationship_types:
             count = rel_counts.get(rel_type.label, 0)
             print(f"- {rel_type.label}: {count}")
-        
+
         # Print total counts
         print(f"\nTotal Nodes Written: {len(neo4j_nodes)}")
         print(f"Total Relationships Written: {len(neo4j_relationships)}")
-        
+
         # Add comprehensive pattern analysis
         print("\n=== Pattern Analysis ===")
-        
+
         # Define expected patterns from requirements.py
         expected_patterns = [
             ("Function", "CALLS", "Function"),
@@ -673,78 +758,53 @@ async def main():
             ("Script", "MODIFIES", "Variable"),
             ("Variable", "ASSIGNED_TO", "Variable"),
         ]
-        
-        # Analyze actual patterns found
+
+        # 修正pattern analysis统计逻辑，确保统计所有类型为Script/Function/Variable的节点
         actual_patterns = {}
         for rel in neo4j_relationships:
             # Get start node type
-            start_node_type = None
-            for node in neo4j_nodes:
-                if node.id == rel.start_node_id:
-                    # Map VariableUse to Variable for pattern matching
-                    if node.label == 'VariableUse':
-                        start_node_type = 'Variable'
-                    else:
-                        start_node_type = node.label
-                    break
-            
-            # Get end node type
-            end_node_type = None
-            end_node_found = False
-            for node in neo4j_nodes:
-                if node.id == rel.end_node_id:
-                    # Map VariableUse to Variable for pattern matching
-                    if node.label == 'VariableUse':
-                        end_node_type = 'Variable'
-                    else:
-                        end_node_type = node.label
-                    end_node_found = True
-                    break
-            
-            # Handle cases where target node doesn't exist (e.g., built-in functions)
-            if not end_node_found:
-                if rel.type == 'CALLS':
-                    # For CALLS relationships, infer the target type from the ID
-                    if rel.end_node_id.startswith('function_'):
-                        end_node_type = 'Function'
-                    elif rel.end_node_id.startswith('script_'):
-                        end_node_type = 'Script'
-                    else:
-                        end_node_type = 'Unknown'
-                else:
-                    end_node_type = 'Unknown'
-            
+            start_node = next((node for node in neo4j_nodes if node.id == rel.start_node_id), None)
+            end_node = next((node for node in neo4j_nodes if node.id == rel.end_node_id), None)
+            start_node_type = start_node.label if start_node else None
+            end_node_type = end_node.label if end_node else None
+
+            # Map VariableUse to Variable for pattern matching
+            if start_node_type == 'VariableUse':
+                start_node_type = 'Variable'
+            if end_node_type == 'VariableUse':
+                end_node_type = 'Variable'
+
             if start_node_type and end_node_type:
                 pattern = (start_node_type, rel.type, end_node_type)
                 actual_patterns[pattern] = actual_patterns.get(pattern, 0) + 1
-        
+
         print("\nExpected Patterns (from requirements.py):")
         for pattern in expected_patterns:
             count = actual_patterns.get(pattern, 0)
             status = "✓" if count > 0 else "✗"
             print(f"{status} {pattern[0]} -[{pattern[1]}]-> {pattern[2]}: {count} instances")
-        
+
         print("\nUnexpected Patterns Found:")
         unexpected_found = False
         for pattern, count in actual_patterns.items():
             if pattern not in expected_patterns:
                 print(f"  {pattern[0]} -[{pattern[1]}]-> {pattern[2]}: {count} instances")
                 unexpected_found = True
-        
+
         if not unexpected_found:
             print("  None")
-        
+
         # Summary statistics
         total_expected_patterns = len(expected_patterns)
         found_patterns = sum(1 for pattern in expected_patterns if actual_patterns.get(pattern, 0) > 0)
         missing_patterns = total_expected_patterns - found_patterns
-        
+
         print(f"\nPattern Coverage:")
         print(f"- Expected patterns: {total_expected_patterns}")
         print(f"- Found patterns: {found_patterns}")
         print(f"- Missing patterns: {missing_patterns}")
         print(f"- Coverage: {found_patterns/total_expected_patterns*100:.1f}%")
-        
+
         if missing_patterns > 0:
             print(f"\nMissing Pattern Types:")
             missing_types = set()
@@ -753,7 +813,7 @@ async def main():
                     missing_types.add(pattern[1])
             for rel_type in sorted(missing_types):
                 print(f"- {rel_type}")
-        
+
         print("================================\n")
 
     except Exception as e:

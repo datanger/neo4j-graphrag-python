@@ -74,20 +74,20 @@ class MatlabExtractor(LLMEntityRelationExtractor):
             create_lexical_graph=create_lexical_graph,
             max_concurrency=max_concurrency,
         )
-        
+
         self.enable_post_processing = enable_post_processing
         self.entry_script_path = entry_script_path
         self.use_llm = use_llm
-        
+
         # 初始化组件
         self.parser = MatlabCodeParser()
         self.post_processor = MatlabPostProcessor()
         self.registry = get_global_registry()
-        
+
         # 设置启动脚本
         if entry_script_path:
             self.registry.set_entry_script(entry_script_path)
-        
+
         # 状态变量
         self.nodes = []
         self.relationships = []
@@ -104,13 +104,13 @@ class MatlabExtractor(LLMEntityRelationExtractor):
             # 转换节点数据为Neo4jNode格式
             label = node_data.get('labels', ['Unknown'])[0] if 'labels' in node_data else node_data.get('label', 'Unknown')
             properties = node_data.get('properties', {})
-            
+
             # 确保属性兼容Neo4j
             properties = {
-                k: ensure_neo4j_compatible(v) 
+                k: ensure_neo4j_compatible(v)
                 for k, v in properties.items()
             }
-            
+
             neo4j_node = Neo4jNode(
                 id=node_data['id'],
                 label=label,
@@ -122,20 +122,20 @@ class MatlabExtractor(LLMEntityRelationExtractor):
         """添加边"""
         if properties is None:
             properties = {}
-        
+
         if line_number:
             properties['line_number'] = line_number
-        
+
         # 确保属性兼容Neo4j
         properties = {
-            k: ensure_neo4j_compatible(v) 
+            k: ensure_neo4j_compatible(v)
             for k, v in properties.items()
         }
-        
+
         # 确定节点类型
         start_node_type = self._get_node_type(source_id)
         end_node_type = self._get_node_type(target_id)
-        
+
         neo4j_relationship = Neo4jRelationship(
             start_node_id=source_id,
             end_node_id=target_id,
@@ -144,7 +144,7 @@ class MatlabExtractor(LLMEntityRelationExtractor):
             end_node_type=end_node_type,
             properties=properties
         )
-        
+
         self.relationships.append(neo4j_relationship)
 
     def _get_node_type(self, node_id: str) -> str:
@@ -165,23 +165,23 @@ class MatlabExtractor(LLMEntityRelationExtractor):
         try:
             # 重置状态
             self._reset_state()
-            
+
             # 解析MATLAB代码
             self._parse_matlab_code(chunk)
-            
+
             # 生成描述（如果需要）
             if self.use_llm and self.llm:
                 await self._generate_descriptions()
-            
+
             # 后处理
             if self.enable_post_processing:
                 self._post_process()
-            
+
             # 构建Neo4j图
             graph = Neo4jGraph(nodes=self.nodes, relationships=self.relationships)
-            
+
             return graph
-            
+
         except Exception as e:
             logger.error(f"Error extracting from chunk: {e}")
             if self.on_error == OnError.RAISE:
@@ -192,22 +192,22 @@ class MatlabExtractor(LLMEntityRelationExtractor):
         """解析MATLAB代码"""
         self.current_file_path = chunk.metadata.get('file_path', 'unknown')
         self.current_content = chunk.text
-        
+
         # 使用解析器解析代码
         nodes, edges = self.parser.parse_matlab_code(self.current_file_path, self.current_content)
-        
+
         # 添加节点和边
         for node in nodes:
             self._add_node_if_not_exists(node)
-        
+
         for edge in edges:
             self._add_edge(
-                edge['source'], 
-                edge['target'], 
-                edge['type'], 
+                edge['source'],
+                edge['target'],
+                edge['type'],
                 edge.get('properties', {})
             )
-        
+
         # 注册到全局注册表
         self.registry.register_file_content(self.current_file_path, self.current_content)
         self.registry.add_nodes(nodes)
@@ -217,7 +217,7 @@ class MatlabExtractor(LLMEntityRelationExtractor):
         """生成节点描述"""
         if not self.llm:
             return
-        
+
         for node in self.nodes:
             if 'description' not in node.properties:
                 code_snippet = get_code_snippet(node)
@@ -231,14 +231,14 @@ class MatlabExtractor(LLMEntityRelationExtractor):
         """为节点生成描述"""
         prompt = f"""
         Generate a brief description for this MATLAB code element:
-        
+
         Type: {node.label}
         Name: {node.properties.get('name', 'Unknown')}
         Code: {code_snippet[:200]}...
-        
+
         Description:
         """
-        
+
         try:
             response = await self.llm.ainvoke(prompt)
             return response.content.strip()
@@ -251,14 +251,14 @@ class MatlabExtractor(LLMEntityRelationExtractor):
         try:
             # 创建临时图进行后处理
             temp_graph = Neo4jGraph(nodes=self.nodes, relationships=self.relationships)
-            
+
             # 应用后处理
             processed_graph = self.post_processor.post_process_cross_file_relationships(temp_graph)
-            
+
             # 更新状态
             self.nodes = processed_graph.nodes
             self.relationships = processed_graph.relationships
-            
+
         except Exception as e:
             logger.error(f"Error in post-processing: {e}")
 
@@ -283,14 +283,14 @@ class MatlabExtractor(LLMEntityRelationExtractor):
         """运行提取器"""
         if enable_post_processing is not None:
             self.enable_post_processing = enable_post_processing
-        
+
         # 重置全局注册表
         reset_global_registry()
-        
+
         # 处理所有块
         all_nodes = []
         all_relationships = []
-        
+
         for chunk in chunks.chunks:
             try:
                 # 只进行解析，不进行后处理
@@ -301,19 +301,19 @@ class MatlabExtractor(LLMEntityRelationExtractor):
                 logger.error(f"Error processing chunk: {e}")
                 if self.on_error == OnError.RAISE:
                     raise
-        
+
         # 创建临时图进行后处理
         temp_graph = Neo4jGraph(nodes=all_nodes, relationships=all_relationships)
-        
+
         # 应用后处理（只调用一次）
         if self.enable_post_processing:
             processed_graph = self.post_processor.post_process_cross_file_relationships(temp_graph)
             all_nodes = processed_graph.nodes
             all_relationships = processed_graph.relationships
-        
+
         # 创建最终图
         final_graph = Neo4jGraph(nodes=all_nodes, relationships=all_relationships)
-        
+
         return MatlabExtractionResult(graph=final_graph)
 
     async def extract_for_chunk_without_post_processing(
@@ -323,23 +323,21 @@ class MatlabExtractor(LLMEntityRelationExtractor):
         try:
             # 重置状态
             self._reset_state()
-            
+
             # 解析MATLAB代码
             self._parse_matlab_code(chunk)
-            
+
             # 生成描述（如果需要）
             if self.use_llm and self.llm:
                 await self._generate_descriptions()
-            
-            # 不进行后处理
-            if self.enable_post_processing:
-                self._post_process()
-            
+
+            # 不进行后处理 - 这是关键区别
+
             # 构建Neo4j图
             graph = Neo4jGraph(nodes=self.nodes, relationships=self.relationships)
-            
+
             return graph
-            
+
         except Exception as e:
             logger.error(f"Error extracting from chunk: {e}")
             if self.on_error == OnError.RAISE:

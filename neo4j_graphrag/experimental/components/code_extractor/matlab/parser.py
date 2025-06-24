@@ -20,6 +20,7 @@ from .utils import _MATLAB_KEYWORDS, _remove_strings
 import re
 from .utils import get_matlab_builtin_functions
 from typing import Dict, List, Optional, Tuple, Any
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -38,38 +39,38 @@ class MatlabCodeParser:
         self.current_file_path = file_path
         self.current_content = content
         self.line_offset = 0
-        
+
         nodes = []
         edges = []
-        
+
         # 解析函数
         function_nodes, function_edges = self._parse_functions()
         nodes.extend(function_nodes)
         edges.extend(function_edges)
-        
+
         # 解析脚本
         script_nodes, script_edges = self._parse_scripts()
         nodes.extend(script_nodes)
         edges.extend(script_edges)
-        
+
         return nodes, edges
 
     def _parse_functions(self) -> Tuple[List[Dict], List[Dict]]:
         """解析函数定义"""
         nodes = []
         edges = []
-        
+
         # 匹配函数定义
         function_pattern = r'^\s*function\s+(?:\[([^\]]+)\]\s*=\s*)?(\w+)\s*\(([^)]*)\)'
-        
+
         for match in re.finditer(function_pattern, self.current_content, re.MULTILINE):
             output_vars = match.group(1)
             func_name = match.group(2)
             input_params = match.group(3)
-            
+
             # 获取函数代码片段
             func_code = self._get_function_code_snippet(match)
-            
+
             # 创建函数节点
             func_node = {
                 'id': f"function_{func_name}_{self.current_file_path}",
@@ -81,11 +82,13 @@ class MatlabCodeParser:
                     'end_line': self._get_line_number(match.start() + len(func_code)),
                     'input_parameters': [p.strip() for p in input_params.split(',') if p.strip()],
                     'output_variables': [v.strip() for v in output_vars.split(',')] if output_vars else [],
-                    'code_snippet': func_code[:500] + "..." if len(func_code) > 500 else func_code
+                    'code_snippet': func_code[:500] + "..." if len(func_code) > 500 else func_code,
+                    'scope_id': Path(self.current_file_path).stem,  # 脚本名称作为作用域ID
+                    'scope_type': 'script'  # 函数的作用域是脚本
                 }
             }
             nodes.append(func_node)
-            
+
             # 处理输入参数
             for param in func_node['properties']['input_parameters']:
                 param_node = {
@@ -97,11 +100,12 @@ class MatlabCodeParser:
                         'function_name': func_name,
                         'file_path': self.current_file_path,
                         'scope_id': func_name,
-                        'scope_type': 'function'
+                        'scope_type': 'function',
+                        'scope_binding': f"function:{func_name}"  # 明确的作用域绑定标识
                     }
                 }
                 nodes.append(param_node)
-                
+
                 # 创建DEFINES关系
                 defines_edge = {
                     'source': func_node['id'],
@@ -113,31 +117,31 @@ class MatlabCodeParser:
                     }
                 }
                 edges.append(defines_edge)
-            
+
             # 提取函数体中的变量
             func_body_nodes, func_body_edges = self.extract_variables_from_code(
-                func_code, 
-                func_node['id'], 
+                func_code,
+                func_node['id'],
                 self.current_file_path,
                 self._get_line_number(match.start())
             )
             nodes.extend(func_body_nodes)
             edges.extend(func_body_edges)
-        
+
         # 处理可能遗漏的函数定义（如 'function result = func_name(input)' 格式）
         alt_function_pattern = r'^\s*function\s+[^=]*=\s*(\w+)\s*\(([^)]*)\)'
         for match in re.finditer(alt_function_pattern, self.current_content, re.MULTILINE):
             func_name = match.group(1)
             input_params = match.group(2)
-            
+
             # 检查是否已经处理过这个函数
             existing_func_id = f"function_{func_name}_{self.current_file_path}"
             if any(node.get('id') == existing_func_id for node in nodes):
                 continue
-            
+
             # 获取函数代码片段
             func_code = self._get_function_code_snippet(match)
-            
+
             # 创建函数节点
             func_node = {
                 'id': existing_func_id,
@@ -149,11 +153,13 @@ class MatlabCodeParser:
                     'end_line': self._get_line_number(match.start() + len(func_code)),
                     'input_parameters': [p.strip() for p in input_params.split(',') if p.strip()],
                     'output_variables': [],
-                    'code_snippet': func_code[:500] + "..." if len(func_code) > 500 else func_code
+                    'code_snippet': func_code[:500] + "..." if len(func_code) > 500 else func_code,
+                    'scope_id': Path(self.current_file_path).stem,  # 脚本名称作为作用域ID
+                    'scope_type': 'script'  # 函数的作用域是脚本
                 }
             }
             nodes.append(func_node)
-            
+
             # 处理输入参数
             for param in func_node['properties']['input_parameters']:
                 param_node = {
@@ -165,11 +171,12 @@ class MatlabCodeParser:
                         'function_name': func_name,
                         'file_path': self.current_file_path,
                         'scope_id': func_name,
-                        'scope_type': 'function'
+                        'scope_type': 'function',
+                        'scope_binding': f"function:{func_name}"  # 明确的作用域绑定标识
                     }
                 }
                 nodes.append(param_node)
-                
+
                 # 创建DEFINES关系
                 defines_edge = {
                     'source': func_node['id'],
@@ -181,35 +188,35 @@ class MatlabCodeParser:
                     }
                 }
                 edges.append(defines_edge)
-            
+
             # 提取函数体中的变量
             func_body_nodes, func_body_edges = self.extract_variables_from_code(
-                func_code, 
-                func_node['id'], 
+                func_code,
+                func_node['id'],
                 self.current_file_path,
                 self._get_line_number(match.start())
             )
             nodes.extend(func_body_nodes)
             edges.extend(func_body_edges)
-        
+
         return nodes, edges
 
     def _parse_scripts(self) -> Tuple[List[Dict], List[Dict]]:
         """解析脚本定义"""
         nodes = []
         edges = []
-        
+
         # 检查是否为脚本文件（包含函数定义）
         function_pattern = r'^\s*function\s+'
         functions_in_script = list(re.finditer(function_pattern, self.current_content, re.MULTILINE))
-        
+
         print(f"DEBUG: Found {len(functions_in_script)} functions in script: {self.current_file_path}")
-        
+
         if functions_in_script:
             # 这是一个包含函数的脚本文件
-            script_name = self.current_file_path.split('/')[-1].replace('.m', '')
+            script_name = Path(self.current_file_path).stem  # 获取不带扩展名的文件名
             script_id = f"script_{script_name}_{self.current_file_path}"
-            
+
             script_node = {
                 'id': script_id,
                 'labels': ['Script'],
@@ -218,11 +225,13 @@ class MatlabCodeParser:
                     'file_path': self.current_file_path,
                     'start_line': 1,
                     'end_line': len(self.current_content.split('\n')),
-                    'code_snippet': self.current_content[:500] + "..." if len(self.current_content) > 500 else self.current_content
+                    'code_snippet': self.current_content[:500] + "..." if len(self.current_content) > 500 else self.current_content,
+                    'scope_id': script_name,  # 脚本的作用域是自身
+                    'scope_type': 'script'  # 脚本的作用域类型
                 }
             }
             nodes.append(script_node)
-            
+
             # 为脚本中定义的每个函数创建DEFINES关系
             for func_match in functions_in_script:
                 # 获取完整的函数定义行
@@ -242,9 +251,9 @@ class MatlabCodeParser:
                             print(f"DEBUG: Could not extract function name from line: {func_line}")
                             continue
                     func_node_id = f"function_{func_name}_{self.current_file_path}"
-                    
+
                     print(f"DEBUG: Creating Script -[DEFINES]-> Function: {script_id} -> {func_node_id}")
-                    
+
                     # 创建脚本定义函数的关系
                     defines_edge = {
                         'source': script_id,
@@ -258,21 +267,21 @@ class MatlabCodeParser:
                     edges.append(defines_edge)
                 else:
                     print(f"DEBUG: Line number {line_number} out of range")
-            
+
             # 提取脚本中的变量（不包括函数体内的变量）
             script_code = self._extract_script_code_only()
             var_nodes, var_edges = self.extract_variables_from_code(
-                script_code, 
-                script_id, 
+                script_code,
+                script_id,
                 self.current_file_path
             )
             nodes.extend(var_nodes)
             edges.extend(var_edges)
         else:
             # 这是一个纯脚本文件
-            script_name = self.current_file_path.split('/')[-1].replace('.m', '')
+            script_name = Path(self.current_file_path).stem  # 获取不带扩展名的文件名
             script_id = f"script_{script_name}_{self.current_file_path}"
-            
+
             script_node = {
                 'id': script_id,
                 'labels': ['Script'],
@@ -281,20 +290,22 @@ class MatlabCodeParser:
                     'file_path': self.current_file_path,
                     'start_line': 1,
                     'end_line': len(self.current_content.split('\n')),
-                    'code_snippet': self.current_content[:500] + "..." if len(self.current_content) > 500 else self.current_content
+                    'code_snippet': self.current_content[:500] + "..." if len(self.current_content) > 500 else self.current_content,
+                    'scope_id': script_name,  # 脚本的作用域是自身
+                    'scope_type': 'script'  # 脚本的作用域类型
                 }
             }
             nodes.append(script_node)
-            
+
             # 提取脚本中的变量
             var_nodes, var_edges = self.extract_variables_from_code(
-                self.current_content, 
-                script_id, 
+                self.current_content,
+                script_id,
                 self.current_file_path
             )
             nodes.extend(var_nodes)
             edges.extend(var_edges)
-        
+
         return nodes, edges
 
     def _extract_script_code_only(self) -> str:
@@ -303,14 +314,14 @@ class MatlabCodeParser:
         script_lines = []
         in_function = False
         function_depth = 0
-        
+
         for line in lines:
             # 检查是否进入函数
             if re.match(r'^\s*function\s+', line):
                 in_function = True
                 function_depth = 1
                 continue
-            
+
             # 检查函数结束
             if in_function:
                 # 计算大括号深度
@@ -320,35 +331,35 @@ class MatlabCodeParser:
                     function_depth = 0
                     continue
                 continue
-            
+
             # 只有在函数外的代码才添加到脚本代码中
             if not in_function:
                 script_lines.append(line)
-        
+
         return '\n'.join(script_lines)
 
     def _get_function_code_snippet(self, func_match) -> str:
         """获取函数的完整代码片段"""
         start_pos = func_match.start()
-        
+
         # 查找函数的结束位置
         lines = self.current_content[start_pos:].split('\n')
         brace_count = 0
         end_pos = start_pos
-        
+
         for i, line in enumerate(lines):
             # 计算大括号
             brace_count += line.count('{') - line.count('}')
-            
+
             # 如果遇到end关键字且大括号平衡，则找到函数结束
             if (re.match(r'^\s*end\s*$', line.strip()) and brace_count <= 0):
                 end_pos = start_pos + len('\n'.join(lines[:i+1]))
                 break
-        
+
         if end_pos == start_pos:
             # 如果没有找到明确的结束，使用整个文件
             end_pos = len(self.current_content)
-        
+
         return self.current_content[start_pos:end_pos]
 
     def _get_line_number(self, text_pos: int) -> int:
@@ -359,10 +370,10 @@ class MatlabCodeParser:
         """从代码中提取变量定义、使用、赋值和修改关系"""
         nodes = []
         edges = []
-        
+
         # 确定作用域类型
         scope_type = 'function' if parent_id.startswith('function_') else 'script'
-        
+
         # 变量定义模式
         var_def_patterns = [
             r'^\s*([a-zA-Z_]\w*)\s*=\s*',  # 简单赋值
@@ -370,20 +381,20 @@ class MatlabCodeParser:
             r'^\s*([a-zA-Z_]\w*)\s*=\s*{',   # 元胞数组赋值
             r'^\s*([a-zA-Z_]\w*)\s*=\s*struct\(',  # 结构体赋值
         ]
-        
+
         # 函数调用模式
         func_call_pattern = r'\b([a-zA-Z_]\w*)\s*\('
-        
+
         # 脚本调用模式
         script_call_patterns = [
             r'^\s*run\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)',  # run('script.m')
             r'^\s*([a-zA-Z_]\w*)\s*;',  # script_name;
         ]
-        
+
         # 变量使用模式（不包括定义）
         var_use_pattern = r'\b([a-zA-Z_]\w*)\b'
-        
-                # 预处理：去除整行注释，保留长度一致
+
+        # 预处理：去除整行注释，保留长度一致
         code_lines = []
         for ln in code.split('\n'):
             if ln.lstrip().startswith('%'):
@@ -395,30 +406,38 @@ class MatlabCodeParser:
 
         # 收集所有变量定义
         defined_vars = set()
+        created_var_nodes = {}  # 用于跟踪已创建的变量节点
+
         for pattern in var_def_patterns:
             for match in re.finditer(pattern, code_no_comments, re.MULTILINE):
                 var_name = match.group(1)
                 defined_vars.add(var_name)
-                
-                # 创建变量节点
-                var_node = {
-                    'id': f"var_{var_name}_{scope_type}_{parent_id}",
-                    'labels': ['Variable'],
-                    'properties': {
-                        'name': var_name,
-                        'type': 'local',
-                        'file_path': file_path,
-                        'scope_id': parent_id,
-                        'scope_type': scope_type,
-                        'definition_line': self._get_line_number(match.start()) + line_offset
+
+                # 创建变量节点，确保作用域绑定
+                var_node_id = f"var_{var_name}_{scope_type}_{parent_id}"
+
+                # 检查是否已创建过该变量节点
+                if var_node_id not in created_var_nodes:
+                    var_node = {
+                        'id': var_node_id,
+                        'labels': ['Variable'],
+                        'properties': {
+                            'name': var_name,
+                            'type': 'local',
+                            'file_path': file_path,
+                            'scope_id': parent_id,
+                            'scope_type': scope_type,
+                            'definition_line': self._get_line_number(match.start()) + line_offset,
+                            'scope_binding': f"{scope_type}:{parent_id}"  # 明确的作用域绑定标识
+                        }
                     }
-                }
-                nodes.append(var_node)
-                
-                # 创建DEFINES关系
+                    nodes.append(var_node)
+                    created_var_nodes[var_node_id] = var_node
+
+                # 创建DEFINES关系 - 确保每个变量都与其作用域绑定
                 defines_edge = {
                     'source': parent_id,
-                    'target': var_node['id'],
+                    'target': var_node_id,
                     'type': 'DEFINES',
                     'properties': {
                         'definition_type': 'assignment',
@@ -426,11 +445,11 @@ class MatlabCodeParser:
                     }
                 }
                 edges.append(defines_edge)
-        
-                # 收集所有函数调用名称用于后续过滤变量
+
+        # 收集所有函数调用名称用于后续过滤变量
         function_call_names = {m.group(1) for m in re.finditer(func_call_pattern, code_no_comments, re.MULTILINE)}
 
-        # 处理变量使用
+        # 处理变量使用 - 只处理同作用域内的变量使用
         used_vars = set()
         for match in re.finditer(var_use_pattern, code_no_comments, re.MULTILINE):
             var_name = match.group(1)
@@ -444,34 +463,64 @@ class MatlabCodeParser:
                 len(var_name) <= 1):
                 continue
             used_vars.add(var_name)
-            # 创建变量节点
-            var_node = {
-                'id': f"var_{var_name}_{scope_type}_{parent_id}",
-                'labels': ['Variable'],
-                'properties': {
-                    'name': var_name,
-                    'type': 'external',
-                    'file_path': file_path,
-                    'scope_id': parent_id,
-                    'scope_type': scope_type,
-                    'usage_line': self._get_line_number(match.start()) + line_offset
-                }
-            }
-            nodes.append(var_node)
-            # 如果变量在当前作用域已定义才立即创建USES关系；外部变量延后到后处理
-            if var_node['properties'].get('type') != 'external':
-                uses_edge = {
-                'source': parent_id,
-                'target': var_node['id'],
-                'type': 'USES',
-                'properties': {
-                    'usage_type': 'variable_reference',
-                    'line_number': self._get_line_number(match.start()) + line_offset
-                }
-            }
-                edges.append(uses_edge)
 
-        # 处理函数调用
+            # 检查变量是否在当前作用域中已定义
+            var_node_id = f"var_{var_name}_{scope_type}_{parent_id}"
+            var_node_exists = var_node_id in created_var_nodes
+
+            # 只处理在当前作用域中已定义的变量
+            # 跨作用域的变量使用将在后处理器中处理
+            if var_name in defined_vars:
+                # 创建变量节点（如果不存在）
+                if not var_node_exists:
+                    var_node = {
+                        'id': var_node_id,
+                        'labels': ['Variable'],
+                        'properties': {
+                            'name': var_name,
+                            'type': 'local',
+                            'file_path': file_path,
+                            'scope_id': parent_id,
+                            'scope_type': scope_type,
+                            'usage_line': self._get_line_number(match.start()) + line_offset,
+                            'scope_binding': f"{scope_type}:{parent_id}"  # 明确的作用域绑定标识
+                        }
+                    }
+                    nodes.append(var_node)
+                    created_var_nodes[var_node_id] = var_node
+
+                # 只创建同作用域内的USES关系
+                uses_edge = {
+                    'source': parent_id,
+                    'target': var_node_id,
+                    'type': 'USES',
+                    'properties': {
+                        'usage_type': 'local_variable',
+                        'line_number': self._get_line_number(match.start()) + line_offset
+                    }
+                }
+                edges.append(uses_edge)
+            else:
+                # 对于未在当前作用域定义的变量，只创建变量节点，不创建USES关系
+                # 这些跨作用域的USES关系将在后处理器中处理
+                if not var_node_exists:
+                    var_node = {
+                        'id': var_node_id,
+                        'labels': ['Variable'],
+                        'properties': {
+                            'name': var_name,
+                            'type': 'external',
+                            'file_path': file_path,
+                            'scope_id': parent_id,
+                            'scope_type': scope_type,
+                            'usage_line': self._get_line_number(match.start()) + line_offset,
+                            'scope_binding': f"{scope_type}:{parent_id}"  # 明确的作用域绑定标识
+                        }
+                    }
+                    nodes.append(var_node)
+                    created_var_nodes[var_node_id] = var_node
+
+        # 处理函数调用 - 只创建CALLS关系，不创建USES关系
         for match in re.finditer(func_call_pattern, code_no_comments, re.MULTILINE):
             func_name = match.group(1)
             # 跳过已定义的变量和MATLAB内置函数
@@ -479,7 +528,7 @@ class MatlabCodeParser:
                  func_name.lower() not in self._BUILTIN_FUNCS and
                  func_name not in used_vars and
                 not func_name.isdigit()):
-                
+
                 # 跳过自调用（函数体内调用与自身同名的函数 -> 递归或误判）
                 current_func_name = parent_id.split('_')[1] if scope_type == 'function' else None
                 if scope_type == 'function' and func_name == current_func_name:
@@ -498,8 +547,8 @@ class MatlabCodeParser:
                 }
                 # CALLS edge generation deferred to post-processing
                 pass
-        
-        # 处理脚本调用
+
+        # 处理脚本调用 - 只创建CALLS关系，不创建USES关系
         for pattern in script_call_patterns:
             for match in re.finditer(pattern, code, re.MULTILINE):
                 script_name = match.group(1)
@@ -519,37 +568,47 @@ class MatlabCodeParser:
                     }
                     # CALLS edge generation deferred to post-processing
                 pass
-        
-        # 处理变量赋值关系
+
+        # 处理变量赋值关系 - 只处理同作用域内的赋值
         assignment_pattern = r'([a-zA-Z_]\w*)\s*=\s*([a-zA-Z_]\w*)'
         for match in re.finditer(assignment_pattern, code, re.MULTILINE):
             target_var = match.group(1)
             source_var = match.group(2)
-            
-            # 创建ASSIGNED_TO关系
-            assigned_edge = {
-                'source': f"var_{source_var}_{parent_id}",
-                'target': f"var_{target_var}_{parent_id}",
-                'type': 'ASSIGNED_TO',
-                'properties': {
-                    'assignment_type': 'direct',
-                    'line_number': self._get_line_number(match.start()) + line_offset
+
+            # 检查源变量和目标变量是否都在当前作用域中定义或使用
+            target_var_id = f"var_{target_var}_{scope_type}_{parent_id}"
+            source_var_id = f"var_{source_var}_{scope_type}_{parent_id}"
+
+            # 确保两个变量都在当前作用域中
+            target_in_scope = target_var_id in created_var_nodes
+            source_in_scope = source_var_id in created_var_nodes
+
+            # 只创建同作用域内的ASSIGNED_TO关系
+            # 跨作用域的ASSIGNED_TO关系将在后处理器中处理
+            if target_in_scope and source_in_scope:
+                assigned_edge = {
+                    'source': source_var_id,
+                    'target': target_var_id,
+                    'type': 'ASSIGNED_TO',
+                    'properties': {
+                        'assignment_type': 'local_assignment',
+                        'line_number': self._get_line_number(match.start()) + line_offset
+                    }
                 }
-            }
-            edges.append(assigned_edge)
-        
+                edges.append(assigned_edge)
+
         # 处理变量修改关系（通过函数调用）
         modify_pattern = r'\[([^\]]+)\]\s*=\s*([a-zA-Z_]\w*)\s*\('
         for match in re.finditer(modify_pattern, code, re.MULTILINE):
             modified_vars = [v.strip() for v in match.group(1).split(',')]
             func_name = match.group(2)
-            
+
             for var_name in modified_vars:
                 if var_name and not var_name.isdigit():
                     # 创建MODIFIES关系
                     modifies_edge = {
                         'source': parent_id,
-                        'target': f"var_{var_name}_{parent_id}",
+                        'target': f"var_{var_name}_{scope_type}_{parent_id}",
                         'type': 'MODIFIES',
                         'properties': {
                             'modification_type': 'function_output',
@@ -558,5 +617,5 @@ class MatlabCodeParser:
                         }
                     }
                     edges.append(modifies_edge)
-        
+
         return nodes, edges

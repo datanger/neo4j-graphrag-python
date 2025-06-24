@@ -1,51 +1,14 @@
-Validating relationship 57992: var_mdl_function_function_verifyOutputDimSizes_tests/matlab_test
-/test_data/test/tpredictMaskedToken.m -[ASSIGNED_TO]-> var_test_isScaledDotProduct
+code_snippet: "function weightsStruct = createParameterStruct(oldWeightsStruct)
+% createParameterStruct   Given the flat struct of BERT model weights, this
+% function parses that into a tree-like struct of weights.
 
-Validating relationship 57993: var_mdl_function_function_verifyOutputDimSizes_tests/matlab_test
-/test_data/test/tpredictMaskedToken.m -[ASSIGNED_TO]-> var_test_function_function_isScaledDotPr
-oduct_tests/matlab_test/test_data/test/transformer/layer/tmultiheadAttention.m
+% Copyright 2021 The MathWorks, Inc.
 
-Validating relationship 57994: var_mdl_function_function_verifyOutputDimSizes_tests/matlab_test
-/test_data/test/tpredictMaskedToken.m -[ASSIGNED_TO]-> var_test_isExpectedValue
-
-Validating relationship 57995: var_mdl_function_function_verifyOutputDimSizes_tests/matlab_test
-/test_data/test/tpredictMaskedToken.m -[ASSIGNED_TO]-> var_test_function_function_isExpectedVal
-ue_tests/matlab_test/test_data/test/transformer/layer/tmultiheadAttention.m
-
-Validating relationship 57996: var_mdl_function_function_verifyOutputDimSizes_tests/matlab_test
-/test_data/test/tpredictMaskedToken.m -[ASSIGNED_TO]-> var_test_multipleQueries
-
-Validating relationship 57997: var_mdl_function_function_verifyOutputDimSizes_tests/matlab_test
-/test_data/test/tpredictMaskedToken.m -[ASSIGNED_TO]-> var_test_function_function_multipleQueri
-es_tests/matlab_test/test_data/test/transformer/layer/tmultiheadAttention.m
-
-Validating relationship 57998: var_mdl_function_function_verifyOutputDimSizes_tests/matlab_test
-/test_data/test/tpredictMaskedToken.m -[ASSIGNED_TO]-> var_test_multipleHeads
-
-Validating relationship 57999: var_mdl_function_function_verifyOutputDimSizes_tests/matlab_test
-/test_data/test/tpredictMaskedToken.m -[ASSIGNED_TO]-> var_test_function_function_multipleHeads
-_tests/matlab_test/test_data/test/transformer/layer/tmultiheadAttention.m
-
-Validating relationship 58000: var_mdl_function_function_verifyOutputDimSizes_tests/matlab_test
-/test_data/test/tpredictMaskedToken.m -[ASSIGNED_TO]-> var_test_defaultIsMasked
-
-Validating relationship 58001: var_mdl_function_function_verifyOutputDimSizes_tests/matlab_test
-/test_data/test/tpredictMaskedToken.m -[ASSIGNED_TO]-> var_test_function_function_defaultIsMask
-ed_tests/matlab_test/test_data/test/transformer/layer/tmultiheadAttention.m
-
-Validating relationship 58002: var_mdl_function_function_verifyOutputDimSizes_tests/matlab_test
-/test_data/test/tpredictMaskedToken.m -[ASSIGNED_TO]-> var_test_canTurnOffMask
-
-Validating relationship 58003: var_mdl_function_function_verifyOutputDimSizes_tests/matlab_test
-/test_data/test/tpredictMaskedToken.m -[ASSIGNED_TO]-> var_test_function_function_canTurnOffMas
-k_tests/matlab_test/test_data/test/transformer/layer/tmultiheadAttention.m
-
-Validating relationship 58004: var_mdl_function_function_verifyOutputDimSizes_tests/matlab_test
-/test_data/test/tpredictMaskedToken.m -[ASSIGNED_TO]-> var_test_canDropout
-
-Validating relationship 58005: var_mdl_function_function_verifyOutputDimSizes_tests/matlab_test
-/test_data/test/tpredictMaskedToken.m -[ASSIGNED_TO]-> var_test_function_function_canDropout_te
-sts/matlab_test/test_data/test/transformer/layer/tmultiheadAttention.m
-
-Validating relationship 58006: var_mdl_function_function_verifyOutputDimSizes_tests/matlab_test
-/test_data/test/tpredictMaskedToken.m -[ASSIGNED_TO]-> var_test_defaultIsNoDropout
+f = fieldnames(oldWeightsStruct);
+for i = 1:numel(f)
+    name = f{i};
+    encoderLayerPrefix = "bert_encoder_layer";
+    embeddingLayerPrefix = "bert_embeddings";
+    poolingLayerPrefix = "bert_pooler_dense";
+    langModPrefix = "cls_predictions";
+    nspPrefix..."
