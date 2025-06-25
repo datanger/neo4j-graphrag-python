@@ -3,59 +3,27 @@ from neo4j_graphrag.embeddings.ollama import OllamaEmbeddings
 from neo4j_graphrag.generation import GraphRAG
 from neo4j_graphrag.llm.ollama_llm import OllamaLLM
 from neo4j_graphrag.retrievers import VectorRetriever
-from neo4j_graphrag.indexes import create_vector_index
 
-from neo4j import GraphDatabase
-from neo4j_graphrag.indexes import upsert_vectors
-from neo4j_graphrag.types import EntityType
-
-from neo4j_graphrag.experimental.pipeline.kg_builder import SimpleKGPipeline
-
-import asyncio
-
-NEO4J_URI = "bolt://localhost:7687"
+NEO4J_URI = "neo4j://localhost:7687"
 NEO4J_USERNAME = "neo4j"
 NEO4J_PASSWORD = "password"
-INDEX_NAME = "test"
-
+INDEX_NAME = "kg_embeddings"  # match your pipeline index name
 
 # Connect to the Neo4j database
 driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USERNAME, NEO4J_PASSWORD))
 
-# Create an Embedder object
+# Use Ollama for embeddings and LLM
 embedder = OllamaEmbeddings(model="nomic-embed-text:latest")
+llm = OllamaLLM(model_name="deepseek-r1:14b", model_params={"temperature": 0})
 
-# Instantiate the LLM
-llm = OllamaLLM(model_name="qwen2.5-coder:1.5b", model_params={"temperature": 0})
+# Initialize the retriever
+retriever = VectorRetriever(driver, INDEX_NAME, embedder)
 
+# Instantiate the RAG pipeline
+rag = GraphRAG(retriever=retriever, llm=llm)
 
-# List the entities and relations the LLM should look for in the text
-node_types = ["Person", "House", "Planet"]
-relationship_types = ["PARENT_OF", "HEIR_OF", "RULES"]
-patterns = [
-    ("Person", "PARENT_OF", "Person"),
-    ("Person", "HEIR_OF", "House"),
-    ("House", "RULES", "Planet"),
-]
-
-# Instantiate the SimpleKGPipeline
-kg_builder = SimpleKGPipeline(
-    llm=llm,
-    driver=driver,
-    embedder=embedder,
-    schema={
-        "node_types": node_types,
-        "relationship_types": relationship_types,
-        "patterns": patterns,
-    },
-    on_error="IGNORE",
-    from_pdf=False,
-)
-
-# Run the pipeline on a piece of text
-text = (
-    "The son of Duke Leto Atreides and the Lady Jessica, Paul is the heir of House "
-    "Atreides, an aristocratic family that rules the planet Caladan."
-)
-asyncio.run(kg_builder.run_async(text=text))
+# Query the graph: change to a MATLAB KG-relevant question
+query_text = "哪些脚本与tests/matlab_test/test_data/PredictMaskedTokensUsingBERT.m有关系？"
+response = rag.search(query_text=query_text, retriever_config={"top_k": 5})
+print(response.answer)
 driver.close()

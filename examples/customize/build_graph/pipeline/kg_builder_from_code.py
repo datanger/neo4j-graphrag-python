@@ -536,6 +536,8 @@ async def main():
                        help='Neo4j password')
     parser.add_argument('--neo4j_db', type=str, default="neo4j",
                        help='Neo4j database name')
+    parser.add_argument('--index_name', type=str, default="kg_embeddings",
+                       help='Neo4j vector index name for embeddings')
 
     args = parser.parse_args()
 
@@ -709,6 +711,39 @@ async def main():
         writer_result = await writer.run(neo4j_graph)
         print(f"Successfully wrote to Neo4j: {writer_result.status}")
 
+        # ---------------------
+        # 向量索引和embedding写入
+        # ---------------------
+        index_name = args.index_name
+        from neo4j_graphrag.experimental.components.kg_writer import create_vector_index, upsert_vectors
+
+        # 1. 检查并创建向量索引（如果不存在）
+        print(f"\n[Embedding] Checking/creating vector index: {index_name}")
+        # 假设所有节点embedding属性名为 'embedding'，维度384，可根据实际调整
+        await create_vector_index(
+            driver=driver,
+            index_name=index_name,
+            label=None,  # None表示所有标签
+            embedding_property="embedding",
+            dimensions=384,
+            distance_metric="cosine",
+            database=NEO4J_DB
+        )
+        print(f"[Embedding] Vector index '{index_name}' is ready.")
+
+        # 2. upsert embedding 到向量索引
+        print(f"[Embedding] Upserting node embeddings to index '{index_name}'...")
+        # 只 upsert 有 embedding 属性的节点
+        embedding_nodes = [n for n in neo4j_nodes if n.properties.get("embedding") is not None]
+        await upsert_vectors(
+            driver=driver,
+            index_name=index_name,
+            nodes=embedding_nodes,
+            embedding_property="embedding",
+            database=NEO4J_DB
+        )
+        print(f"[Embedding] Upserted {len(embedding_nodes)} node embeddings to '{index_name}'.")
+
         # Print summary of nodes and relationships by type
         print("\n=== Neo4j Write Summary ===")
 
@@ -746,17 +781,23 @@ async def main():
         # Define expected patterns from requirements.py
         expected_patterns = [
             ("Function", "CALLS", "Function"),
-            # ("Function", "CALLS", "Script"),
             ("Script", "CALLS", "Function"),
             ("Script", "CALLS", "Script"),
+            ("Class", "CALLS", "Function"),
+            ("Class", "CALLS", "Script"),
             ("Function", "USES", "Variable"),
             ("Script", "USES", "Variable"),
+            ("Class", "USES", "Variable"),
             ("Function", "DEFINES", "Variable"),
             ("Script", "DEFINES", "Variable"),
             ("Script", "DEFINES", "Function"),
-            # ("Function", "MODIFIES", "Variable"),
+            ("Class", "DEFINES", "Variable"),
             ("Script", "MODIFIES", "Variable"),
+            ("Class", "MODIFIES", "Variable"),
             ("Variable", "ASSIGNED_TO", "Variable"),
+            ("Class", "INHERITS_FROM", "Class"),
+            ("Class", "HAS_METHOD", "Function"),
+            ("Class", "HAS_PROPERTY", "Variable"),
         ]
 
         # 修正pattern analysis统计逻辑，确保统计所有类型为Script/Function/Variable的节点
