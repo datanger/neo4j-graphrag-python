@@ -245,9 +245,18 @@ class MatlabCodeParser:
             # 跳过 classdef 范围内的方法，避免重复解析
             if any(start <= match.start() < end for start, end in self._class_ranges):
                 continue
+            
             output_vars = match.group(1)
-            func_name = match.group(2)
             input_params = match.group(3)
+
+            # Handle MATLAB packages (directories starting with '+')
+            package_parts = [part[1:] for part in Path(self.current_file_path).parts if part.startswith('+')]
+            if package_parts:
+                package_prefix = '.'.join(package_parts)
+                original_func_name = match.group(2)
+                func_name = f"{package_prefix}.{original_func_name}"
+            else:
+                func_name = match.group(2)
 
             # 获取函数代码片段
             func_code = self._get_function_code_snippet(match)
@@ -263,7 +272,7 @@ class MatlabCodeParser:
                     'end_line': self._get_line_number(match.start() + len(func_code)),
                     'input_parameters': [p.strip() for p in input_params.split(',') if p.strip()],
                     'output_variables': [v.strip() for v in output_vars.split(',')] if output_vars else [],
-                    'code_snippet': func_code[:500] + "..." if len(func_code) > 500 else func_code,
+                    'code_snippet': func_code,
                     'scope_id': Path(self.current_file_path).stem,  # 脚本名称作为作用域ID
                     'scope_type': 'script'  # 函数的作用域是脚本
                 }
@@ -312,8 +321,16 @@ class MatlabCodeParser:
         # 处理可能遗漏的函数定义（如 'function result = func_name(input)' 格式）
         alt_function_pattern = r'^\s*function\s+[^=]*=\s*(\w+)\s*\(([^)]*)\)'
         for match in re.finditer(alt_function_pattern, self.current_content, re.MULTILINE):
-            func_name = match.group(1)
             input_params = match.group(2)
+
+            # Handle MATLAB packages (directories starting with '+')
+            package_parts = [part[1:] for part in Path(self.current_file_path).parts if part.startswith('+')]
+            if package_parts:
+                package_prefix = '.'.join(package_parts)
+                original_func_name = match.group(1)
+                func_name = f"{package_prefix}.{original_func_name}"
+            else:
+                func_name = match.group(1)
 
             # 检查是否已经处理过这个函数
             existing_func_id = f"function_{func_name}_{self.current_file_path}"
@@ -334,7 +351,7 @@ class MatlabCodeParser:
                     'end_line': self._get_line_number(match.start() + len(func_code)),
                     'input_parameters': [p.strip() for p in input_params.split(',') if p.strip()],
                     'output_variables': [],
-                    'code_snippet': func_code[:500] + "..." if len(func_code) > 500 else func_code,
+                    'code_snippet': func_code,
                     'scope_id': Path(self.current_file_path).stem,  # 脚本名称作为作用域ID
                     'scope_type': 'script'  # 函数的作用域是脚本
                 }
@@ -406,7 +423,7 @@ class MatlabCodeParser:
                     'file_path': self.current_file_path,
                     'start_line': 1,
                     'end_line': len(self.current_content.split('\n')),
-                    'code_snippet': self.current_content[:500] + "..." if len(self.current_content) > 500 else self.current_content,
+                    'code_snippet': self.current_content,
                     'scope_id': script_name,  # 脚本的作用域是自身
                     'scope_type': 'script'  # 脚本的作用域类型
                 }
@@ -471,7 +488,7 @@ class MatlabCodeParser:
                     'file_path': self.current_file_path,
                     'start_line': 1,
                     'end_line': len(self.current_content.split('\n')),
-                    'code_snippet': self.current_content[:500] + "..." if len(self.current_content) > 500 else self.current_content,
+                    'code_snippet': self.current_content,
                     'scope_id': script_name,  # 脚本的作用域是自身
                     'scope_type': 'script'  # 脚本的作用域类型
                 }

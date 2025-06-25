@@ -138,6 +138,7 @@ class GraphRAG:
         retriever_result: RetrieverResult = self.retriever.search(
             query_text=query, **validated_data.retriever_config
         )
+        print("retriever_result.items:",retriever_result.items)
         if len(retriever_result.items) == 0 and response_fallback is not None:
             answer = response_fallback
         else:

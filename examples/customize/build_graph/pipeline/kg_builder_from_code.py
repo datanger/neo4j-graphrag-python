@@ -47,6 +47,7 @@ logging.basicConfig(
 
 import asyncio
 import neo4j
+from neo4j_graphrag.embeddings.ollama import OllamaEmbeddings
 from neo4j_graphrag.llm.base import LLMInterface
 from neo4j_graphrag.experimental.components.code_extractor.matlab.matlab_extractor import (
     MatlabExtractor, MatlabExtractionResult, get_global_registry
@@ -328,16 +329,19 @@ async def process_matlab_files(directory: str, llm: LLMInterface, entry_script_p
         script_name = file_path.stem
         entry_processor.register_script_variables(script_name, content)
 
+        # Calculate relative path from matlab_dir
+        relative_path = file_path.relative_to(Path(directory))
+
         # Create a text chunk with required fields
         chunk = TextChunk(
             text=content,
             index=0,
-            metadata={"file_path": str(file_path), "file_name": file_path.name, "code_type": "matlab"}
+            metadata={"file_path": str(relative_path), "file_name": file_path.name, "code_type": "matlab"}
         )
 
         # Create document info with required path field for this file
         doc_info = DocumentInfo(
-            path=str(file_path),
+            path=str(relative_path),
             metadata={"name": file_path.name}
         )
 
@@ -675,6 +679,50 @@ async def main():
         from neo4j_graphrag.experimental.components.types import Neo4jGraph, Neo4jNode, Neo4jRelationship
 
         # Create Neo4jNode objects
+        # ---------------------
+        # Embedding Generation
+        # ---------------------
+        print("\n[Embedding] Generating embeddings for Script, Function, and Class nodes...")
+        # 使用与 zzz.py 相同的模型
+        embedder = OllamaEmbeddings(model="dengcao/Qwen3-Embedding-8B:Q5_K_M")
+        embedded_nodes_count = 0
+        texts_to_embed = []
+        nodes_to_embed = []
+
+        # Collect texts and nodes for batch embedding
+        for node in nodes:
+            if node.get('label') in ['Script', 'Function', 'Class']:
+                properties = node.get('properties', {})
+                # Create a string from all non-empty properties for embedding
+                prop_text = " ".join([f"{k}: {v}" for k, v in properties.items() if v and k != 'embedding'])
+                if prop_text:
+                    texts_to_embed.append(prop_text)
+                    nodes_to_embed.append(node)
+
+        # Save the generated texts to a file for debugging
+        import json
+        print("\n[Debug] Saving texts for embedding to texts_for_embedding.json...")
+        with open('texts_for_embedding.json', 'w', encoding='utf-8') as f:
+            json.dump(texts_to_embed, f, ensure_ascii=False, indent=2)
+        print("[Debug] Saved successfully.")
+
+        # Embed one by one as batch method is not available
+        if texts_to_embed:
+            print(f"[Embedding] Found {len(texts_to_embed)} nodes to embed. Generating embeddings one by one...")
+            try:
+                # Using tqdm for progress bar
+                for i, node in enumerate(tqdm(nodes_to_embed, desc="Generating Embeddings")):
+                    text = texts_to_embed[i]
+                    embedding = embedder.embed_query(text)
+                    if 'properties' not in node:
+                        node['properties'] = {}
+                    node['properties']['embedding'] = embedding
+                    embedded_nodes_count += 1
+            except Exception as e:
+                print(f"Warning: Failed to generate embeddings: {e}")
+
+        print(f"[Embedding] Successfully generated embeddings for {embedded_nodes_count} nodes.")
+
         print("Creating Neo4j nodes and relationships...")
         neo4j_nodes = []
         for node in nodes:
@@ -715,34 +763,113 @@ async def main():
         # 向量索引和embedding写入
         # ---------------------
         index_name = args.index_name
-        from neo4j_graphrag.experimental.components.kg_writer import create_vector_index, upsert_vectors
+        from neo4j_graphrag.indexes import create_vector_index, upsert_vectors
 
-        # 1. 检查并创建向量索引（如果不存在）
-        print(f"\n[Embedding] Checking/creating vector index: {index_name}")
-        # 假设所有节点embedding属性名为 'embedding'，维度384，可根据实际调整
-        await create_vector_index(
-            driver=driver,
-            index_name=index_name,
-            label=None,  # None表示所有标签
-            embedding_property="embedding",
-            dimensions=384,
-            distance_metric="cosine",
-            database=NEO4J_DB
-        )
-        print(f"[Embedding] Vector index '{index_name}' is ready.")
+        # 1. 为所有 Function、Script、Class 节点添加通用标签 CodeElement
+        print(f"\n[Embedding] Adding unified label 'CodeElement' to all nodes...")
+        with driver.session(database=NEO4J_DB) as session:
+            # 为 Function 节点添加 CodeElement 标签
+            result = session.run("""
+                MATCH (n:Function)
+                SET n:CodeElement
+                RETURN count(n) as count
+            """)
+            func_count = result.single()["count"]
+            print(f"[Embedding] Added CodeElement label to {func_count} Function nodes")
+            
+            # 为 Script 节点添加 CodeElement 标签
+            result = session.run("""
+                MATCH (n:Script)
+                SET n:CodeElement
+                RETURN count(n) as count
+            """)
+            script_count = result.single()["count"]
+            print(f"[Embedding] Added CodeElement label to {script_count} Script nodes")
+            
+            # 为 Class 节点添加 CodeElement 标签
+            result = session.run("""
+                MATCH (n:Class)
+                SET n:CodeElement
+                RETURN count(n) as count
+            """)
+            class_count = result.single()["count"]
+            print(f"[Embedding] Added CodeElement label to {class_count} Class nodes")
+            
+            total_code_elements = func_count + script_count + class_count
+            print(f"[Embedding] Total CodeElement nodes: {total_code_elements}")
 
-        # 2. upsert embedding 到向量索引
-        print(f"[Embedding] Upserting node embeddings to index '{index_name}'...")
-        # 只 upsert 有 embedding 属性的节点
-        embedding_nodes = [n for n in neo4j_nodes if n.properties.get("embedding") is not None]
-        await upsert_vectors(
-            driver=driver,
-            index_name=index_name,
-            nodes=embedding_nodes,
+        # 2. 删除可能存在的旧索引
+        try:
+            with driver.session(database=NEO4J_DB) as session:
+                session.run(f"DROP INDEX {index_name} IF EXISTS")
+                print(f"[Embedding] Dropped existing index: {index_name}")
+        except Exception as e:
+            print(f"[Embedding] Warning: Could not drop existing index: {e}")
+        
+        # 3. 创建统一的向量索引 - 使用 CodeElement 标签
+        create_vector_index(
+            driver,
+            index_name,
+            label="CodeElement",  # 使用统一的标签
             embedding_property="embedding",
-            database=NEO4J_DB
+            dimensions=4096,  # Qwen3-Embedding-8B 的真实维度
+            similarity_fn="cosine",
+            neo4j_database=NEO4J_DB
         )
-        print(f"[Embedding] Upserted {len(embedding_nodes)} node embeddings to '{index_name}'.")
+        print(f"[Embedding] Unified vector index '{index_name}' created successfully.")
+
+        # 4. upsert embedding 到统一索引
+        print(f"[Embedding] Upserting node embeddings to unified index '{index_name}'...")
+        embedding_nodes = [n for n in neo4j_nodes if n.properties.get("embedding") is not None and n.label in ["Function", "Script", "Class"]]
+        print(f"[Embedding] Upserting {len(embedding_nodes)} nodes into the unified vector index...")
+        
+        if embedding_nodes:
+            node_ids = [n.id for n in embedding_nodes]
+            node_embeddings = [n.properties["embedding"] for n in embedding_nodes]
+            upsert_vectors(
+                driver,
+                ids=node_ids,
+                embeddings=node_embeddings,
+                embedding_property="embedding",
+                neo4j_database=NEO4J_DB
+            )
+        print(f"[Embedding] Successfully upserted {len(embedding_nodes)} node embeddings to '{index_name}'.")
+
+        # 5. 验证索引创建
+        print(f"\n[Embedding] Verifying unified vector index...")
+        with driver.session(database=NEO4J_DB) as session:
+            # 检查索引是否存在
+            index_info = session.run("""
+                SHOW INDEXES YIELD name, type, labelsOrTypes, properties, options
+                WHERE type = 'VECTOR' AND name = $index_name
+                RETURN name, labelsOrTypes, properties, options
+            """, index_name=index_name).single()
+            
+            if index_info:
+                print(f"[Embedding] ✓ Unified vector index verified:")
+                print(f"  - Name: {index_info['name']}")
+                print(f"  - Labels: {index_info['labelsOrTypes']}")
+                print(f"  - Properties: {index_info['properties']}")
+                print(f"  - Dimensions: {index_info['options'].get('indexConfig', {}).get('vector.dimensions', 'N/A')}")
+            else:
+                print(f"[ERROR] Unified vector index '{index_name}' not found!")
+            
+            # 统计各类型节点的 embedding 数量
+            for label in ["Function", "Script", "Class"]:
+                count = session.run(f"""
+                    MATCH (n:{label}:CodeElement)
+                    WHERE n.embedding IS NOT NULL
+                    RETURN count(n) as count
+                """).single()["count"]
+                print(f"  - {label} nodes with embedding: {count}")
+            
+            # 统计总的 CodeElement 节点数量
+            total_count = session.run("""
+                MATCH (n:CodeElement)
+                WHERE n.embedding IS NOT NULL
+                RETURN count(n) as count
+            """).single()["count"]
+            print(f"  - Total CodeElement nodes with embedding: {total_count}")
 
         # Print summary of nodes and relationships by type
         print("\n=== Neo4j Write Summary ===")

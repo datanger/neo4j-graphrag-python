@@ -1,4 +1,4 @@
- # Copyright (c) "Neo4j"
+# Copyright (c) "Neo4j"
 # Neo4j Sweden AB [https://neo4j.com]
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -81,10 +81,10 @@ def ensure_neo4j_compatible(value: Any) -> Any:
         return str(value)
 
 
-def get_code_snippet(node: Dict[str, Any], max_length: int = 500) -> str:
+def get_code_snippet(node: Dict[str, Any], max_length: int = None) -> str:
     """获取代码片段"""
     code = node.get('properties', {}).get('code_snippet', '')
-    if len(code) > max_length:
+    if max_length and len(code) > max_length:
         return code[:max_length] + "..."
     return code
 
